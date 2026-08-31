@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const PACKAGE_REGISTRY_URL = 'https://npm.pkg.github.com';
+const PACKAGE_REGISTRY_URL = 'https://registry.npmjs.org';
 const UPSTREAM_NPM_REGISTRY_URL = 'https://registry.npmjs.org/@openchamber%2Fweb';
 const CHANGELOG_URL = 'https://raw.githubusercontent.com/openchamber/openchamber/main/CHANGELOG.md';
 const FORK_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';

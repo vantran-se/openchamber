@@ -14,14 +14,13 @@ Full project overview, screenshots, and all features: [github.com/openchamber/op
 curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash
 ```
 
-Install this fork from GitHub Packages:
+Install this fork from npm:
 
 ```bash
-npm config set @vantran-se:registry https://npm.pkg.github.com
 npm install -g @vantran-se/openchamber-web
 ```
 
-GitHub Packages requires a GitHub token with `read:packages` for private packages. The published fork keeps the `openchamber` command and updates from the same package.
+The package keeps the `openchamber` command and updates from the same npm package.
 
 > **Prerequisites:** [OpenCode CLI](https://opencode.ai) installed, Node.js 22+.
 

@@ -18,7 +18,7 @@ on:
 
 permissions:
   contents: write
-  packages: write
+  id-token: write
 
 jobs:
   release:
@@ -36,8 +36,7 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@vantran-se"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Resolve and verify version
         id: version
@@ -78,12 +77,10 @@ jobs:
         working-directory: packages/web
         run: npm pack
 
-      - name: Publish to GitHub Packages
+      - name: Publish to npm
         if: ${{ github.event.inputs.dry_run != 'true' }}
         working-directory: packages/web
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish --access public --provenance
 
       - name: Publish GitHub release
         if: ${{ github.event.inputs.dry_run != 'true' }}

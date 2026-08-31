@@ -163,9 +163,9 @@ describe('checkForUpdates', () => {
 });
 
 describe('getUpdateCommand', () => {
-  it('installs the fork package from GitHub Packages', () => {
+  it('installs the public fork package from npm', () => {
     expect(getUpdateCommand('npm')).toBe(
-      'npm install -g @vantran-se/openchamber-web@latest --registry=https://npm.pkg.github.com',
+      'npm install -g @vantran-se/openchamber-web@latest --registry=https://registry.npmjs.org',
     );
   });
 });
