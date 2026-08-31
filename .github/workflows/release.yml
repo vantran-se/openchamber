@@ -57,12 +57,12 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
       - name: Set fork package name
         working-directory: packages/web
         run: npm pkg set name=@vantran-se/openchamber-web
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
 
       - name: Validate
         run: |
