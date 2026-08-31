@@ -8,12 +8,15 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PACKAGE_NAME = '@openchamber/web';
+const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}`;
+const PACKAGE_REGISTRY_URL = 'https://npm.pkg.github.com';
+const UPSTREAM_NPM_REGISTRY_URL = 'https://registry.npmjs.org/@openchamber%2Fweb';
 const CHANGELOG_URL = 'https://raw.githubusercontent.com/openchamber/openchamber/main/CHANGELOG.md';
-const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
-const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
+const FORK_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
+const FORK_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases/latest';
+const UPSTREAM_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
+const UPSTREAM_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
 let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
@@ -96,7 +99,7 @@ async function resolveAndroidApkUrl(version, candidateUrl) {
   }
 
   try {
-    const response = await fetch(`${GITHUB_RELEASES_API_URL}/tags/v${version}`, {
+    const response = await fetch(`${UPSTREAM_RELEASES_API_URL}/tags/v${version}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'openchamber-update-check',
@@ -158,7 +161,7 @@ async function checkForUpdatesFromApi(currentVersion, options = {}) {
     const versionComparison = compareVersions(data.latestVersion, currentVersion);
     if (versionComparison < 0) return null;
 
-    const releaseUrl = `${GITHUB_RELEASES_URL}/tag/v${data.latestVersion}`;
+    const releaseUrl = `${UPSTREAM_RELEASES_URL}/tag/v${data.latestVersion}`;
     const downloadUrl = typeof data.downloadUrl === 'string'
       ? data.downloadUrl
       : typeof data.download?.url === 'string'
@@ -658,13 +661,13 @@ export function getUpdateCommand(pm = detectPackageManager()) {
   const pmCommand = quoteCommand(resolvePackageManagerCommand(pm));
   switch (pm) {
     case 'pnpm':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
+      return `${pmCommand} add -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
     case 'yarn':
-      return `${pmCommand} global add ${PACKAGE_NAME}@latest`;
+      return `${pmCommand} global add ${PACKAGE_NAME}@latest --registry ${PACKAGE_REGISTRY_URL}`;
     case 'bun':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
+      return `${pmCommand} add -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
     default:
-      return `${pmCommand} install -g ${PACKAGE_NAME}@latest`;
+      return `${pmCommand} install -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
   }
 }
 
@@ -684,9 +687,9 @@ export function getCurrentVersion() {
 /**
  * Fetch latest version from npm registry
  */
-async function getLatestVersion() {
+async function getLatestUpstreamVersion() {
   try {
-    const response = await fetch(NPM_REGISTRY_URL, {
+    const response = await fetch(UPSTREAM_NPM_REGISTRY_URL, {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(10000),
     });
@@ -697,7 +700,34 @@ async function getLatestVersion() {
 
     const data = await response.json();
     return data['dist-tags']?.latest || null;
-  } catch (error) {
+  } catch {
+    return null;
+  }
+}
+
+async function getLatestForkRelease() {
+  try {
+    const response = await fetch(FORK_LATEST_RELEASE_API_URL, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'openchamber-update-check',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) return null;
+
+    const release = await response.json();
+    const tagName = String(release?.tag_name || '');
+    const versionMatch = tagName.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
+    if (!versionMatch) return null;
+
+    const releaseBody = String(release?.body || '').trim();
+    return {
+      version: versionMatch[1],
+      body: releaseBody || undefined,
+      releaseUrl: `${FORK_RELEASES_URL}/tag/v${versionMatch[1]}`,
+    };
+  } catch {
     return null;
   }
 }
@@ -773,15 +803,9 @@ export async function checkForUpdates(options = {}) {
   const appType = normalizeAppType(options.appType);
   const platform = normalizePlatform(options.platform);
 
-  if (currentVersion !== 'unknown') {
+  if (appType !== 'web' && currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
-      if (remote.available && appType === 'web') {
-        const npmLatest = await getLatestVersion();
-        if (!npmLatest || compareVersions(npmLatest, remote.version) < 0) {
-          remote.available = false;
-        }
-      }
       return {
         ...remote,
         packageManager: pm,
@@ -790,7 +814,28 @@ export async function checkForUpdates(options = {}) {
     }
   }
 
-  const latestVersion = await getLatestVersion();
+  if (appType === 'web') {
+    const release = await getLatestForkRelease();
+    if (!release || currentVersion === 'unknown') {
+      return {
+        available: false,
+        currentVersion,
+        error: 'Unable to determine versions',
+      };
+    }
+
+    return {
+      available: compareVersions(release.version, currentVersion) > 0,
+      version: release.version,
+      currentVersion,
+      body: release.body,
+      releaseUrl: release.releaseUrl,
+      packageManager: pm,
+      updateCommand: 'openchamber update',
+    };
+  }
+
+  const latestVersion = await getLatestUpstreamVersion();
 
   if (!latestVersion || currentVersion === 'unknown') {
     return {
@@ -815,10 +860,9 @@ export async function checkForUpdates(options = {}) {
     version: latestVersion,
     currentVersion,
     body: changelog,
-    releaseUrl: `${GITHUB_RELEASES_URL}/tag/v${latestVersion}`,
+    releaseUrl: `${UPSTREAM_RELEASES_URL}/tag/v${latestVersion}`,
     downloadUrl,
     packageManager: pm,
-    // Show our CLI command, not raw package manager command
     updateCommand: 'openchamber update',
   };
 }

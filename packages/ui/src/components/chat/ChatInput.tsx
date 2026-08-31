@@ -117,6 +117,8 @@ import {
     type ComposerChange,
     type ComposerEditorHandle,
 } from './composer/editor/ComposerEditor';
+import { ComposerEditorTextarea } from './composer/editor/ComposerEditorTextarea';
+import { shouldUseNativeComposerTextarea } from './composer/editor/nativeTextarea';
 import { createComposerEditorViewStore } from './composer/editor/viewStore';
 import { composerAutoCorrect } from './composer/editor/autocorrect';
 import {
@@ -425,6 +427,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const getVisibleAgents = useConfigStore((state) => state.getVisibleAgents);
     const agents = getVisibleAgents();
     const isMobile = useUIStore((state) => state.isMobile);
+    const useNativeComposerTextarea = isMobile && shouldUseNativeComposerTextarea();
+    const ComposerEditorComponent = useNativeComposerTextarea ? ComposerEditorTextarea : ComposerEditor;
     const hasHardwareKeyboard = useHardwareKeyboard();
     const { enabled: isTabletLayout } = useTabletLayout();
     const setImagePreviewOpen = useUIStore((state) => state.setImagePreviewOpen);
@@ -3007,9 +3011,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                                 ? { minHeight: `${dictationContentHeight}px` }
                                 : undefined}
                         >
-                            <ComposerEditor
+                            <ComposerEditorComponent
                                 ref={composerRef}
-                                viewStore={composerViewStore}
+                                viewStore={useNativeComposerTextarea ? undefined : composerViewStore}
                                 data-testid="chat-input"
                                 value={message}
                                 languageContext={languageContext}

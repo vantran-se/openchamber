@@ -22,9 +22,12 @@ import type { ComposerEditorHandle } from '../editor/ComposerEditor';
 // fair share of Android WebView/Chrome builds, and unlike iOS Safari they do
 // not reliably reveal the focused field either — the composer just stays
 // behind the keyboard. iOS keeps its browser-native reveal on the chat
-// screen, so this stays Android-only there.
+// screen in Safari, but standalone mode loses it after keyboard transitions.
 // Callers are browser-only React effects, so navigator always exists here.
 const isAndroidBrowser = (): boolean => /Android/i.test(navigator.userAgent);
+
+const isStandaloneBrowser = (): boolean =>
+    window.matchMedia?.('(display-mode: standalone)')?.matches === true;
 
 export interface MobileViewportPinOptions {
     isMobile: boolean;
@@ -106,13 +109,13 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
     }, [editorRef, formRef, isFullscreen, isMobile]);
 
     // Keyboard up: anchor the normal-height composer to the visible bottom.
-    // Draft screen on every mobile browser; chat screen only on Android,
-    // where neither viewport resizing nor the focused-field reveal can be
-    // relied on (iOS chat keeps the browser's own reveal).
+    // Draft screen on every mobile browser; chat screen on Android and in an
+    // installed PWA, where focused-field reveal cannot be relied on after a
+    // keyboard close and reopen.
     React.useLayoutEffect(() => {
         if (!isMobile || isCapacitorApp()) return;
         if (isFullscreen || !isFocused) return;
-        if (!isDraftScreen && !isAndroidBrowser()) return;
+        if (!isDraftScreen && !isAndroidBrowser() && !isStandaloneBrowser()) return;
         const vv = window.visualViewport;
         const form = formRef.current;
         if (!vv || !form) return;

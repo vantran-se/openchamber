@@ -68,9 +68,13 @@ copy.
 
 ## The editor
 
-`editor/` wraps CodeMirror. The document is a plain string: `getValue()` is
-exactly what gets sent, so nothing downstream serializes a rich document model
-back into a prompt.
+`editor/` wraps CodeMirror. On iOS, the composer uses its native textarea
+fallback because Apple Vietnamese Telex can send plain `insertText` events to a
+rich `contenteditable` without starting composition, leaving CodeMirror no IME
+state to preserve. The fallback keeps the same plain-text and imperative editor
+contract but does not paint prompt syntax. The document is a plain string:
+`getValue()` is exactly what gets sent, so nothing downstream serializes a rich
+document model back into a prompt.
 
 The document is not, however, the string it was given: CodeMirror normalizes
 line endings, so a `\r\n` pair becomes one break and the document ends up
@@ -195,8 +199,10 @@ splicing, large-paste detection, paste-offer invalidation, message history, and
 the CodeMirror language extension at the `EditorState` level.
 
 Rendering, focus, keyboard behavior, IME and WKWebView are **not covered by
-tests** and are verified by hand. Do not report a change to them as validated
-on the strength of type-check and unit tests.
+tests** and are verified by hand. On iOS, test a cold standalone-PWA launch with
+the Apple Vietnamese keyboard, then close and reopen the keyboard in both a new
+draft and an existing chat. Do not report a change to them as validated on the
+strength of type-check and unit tests.
 
 Run tests per file (`bun test <path>`): `mock.module` is process-global, so
 suites that install module mocks are order-dependent.

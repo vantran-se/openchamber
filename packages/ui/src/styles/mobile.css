@@ -322,7 +322,6 @@
   }
 }
 
-/* Phase 6: Home indicator blur gradient fix */
 @media (display-mode: standalone) and (max-width: 768px) {
   .pwa-dialog-content {
     --pwa-dialog-padding: clamp(0.75rem, 3vw, 1.25rem);
@@ -385,58 +384,6 @@
 
   .pwa-overlay-panel .pwa-overlay-scroll {
     padding-bottom: calc(var(--oc-safe-area-bottom-visual, 0px) + 12px);
-  }
-}
-
-@media (display-mode: standalone) {
-  /* Home indicator overlay */
-  :root.device-mobile:not(.desktop-runtime) body::after,
-  :root.device-tablet:not(.desktop-runtime) body::after,
-  :root.mobile-pointer:not(.desktop-runtime) body::after {
-    content: '';
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: var(--oc-safe-area-bottom-visual, var(--oc-safe-area-bottom, env(safe-area-inset-bottom, 0)));
-    background: linear-gradient(
-      to top,
-      var(--background) 0%,
-      var(--background) 30%,
-      rgba(from var(--background) r g b / 0.8) 60%,
-      rgba(from var(--background) r g b / 0.3) 85%,
-      transparent 100%
-    );
-    z-index: 1000;
-    pointer-events: none;
-  }
-
-  /* Fallback for browsers without rgba(from ...) support */
-  @supports not (color: rgba(from white r g b / 0.5)) {
-    :root.device-mobile:not(.desktop-runtime) body::after,
-    :root.device-tablet:not(.desktop-runtime) body::after,
-    :root.mobile-pointer:not(.desktop-runtime) body::after {
-      background: linear-gradient(
-        to top,
-        var(--background) 0%,
-        var(--background) 30%,
-        rgba(21, 19, 19, 0.8) 60%,  /* Dark theme fallback */
-        rgba(21, 19, 19, 0.3) 85%,
-        transparent 100%
-      );
-    }
-
-    /* Light theme fallback */
-    :root body::after {
-      background: linear-gradient(
-        to top,
-        var(--background) 0%,
-        var(--background) 30%,
-        rgba(248, 247, 243, 0.8) 60%,  /* Light theme fallback */
-        rgba(248, 247, 243, 0.3) 85%,
-        transparent 100%
-      );
-    }
   }
 }
 
