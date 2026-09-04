@@ -2588,6 +2588,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         selectedDraftDirectory,
         selectedDraftBranchLabel,
         selectedDraftBranchIsKnown,
+        selectedDraftDirectoryHasUncommittedChanges,
         projectRootBranchOption,
         worktreeBranchOptions,
         draftBranchItems,
@@ -2855,6 +2856,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                             selectedDirectory={selectedDraftDirectory}
                             selectedBranchLabel={selectedDraftBranchLabel}
                             selectedBranchIsKnown={selectedDraftBranchIsKnown}
+                            hasUncommittedChanges={selectedDraftDirectoryHasUncommittedChanges}
                             projectRootBranchOption={projectRootBranchOption}
                             worktreeBranchOptions={worktreeBranchOptions}
                             branchItems={draftBranchItems}
@@ -2869,6 +2871,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     <MobileDraftTargetTriggers
                         selectedProject={selectedDraftProject}
                         selectedBranchLabel={selectedDraftBranchLabel}
+                        hasUncommittedChanges={selectedDraftDirectoryHasUncommittedChanges}
                         showBranchSelector={shouldShowDraftBranchSelector}
                         theme={currentTheme}
                         onOpenPicker={setMobileDraftPicker}
@@ -3280,6 +3283,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 selectedDirectory={selectedDraftDirectory}
                 selectedBranchLabel={selectedDraftBranchLabel}
                 selectedBranchIsKnown={selectedDraftBranchIsKnown}
+                hasUncommittedChanges={selectedDraftDirectoryHasUncommittedChanges}
                 projectRootBranchOption={projectRootBranchOption}
                 worktreeBranchOptions={worktreeBranchOptions}
                 branchItems={draftBranchItems}
