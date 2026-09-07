@@ -35,6 +35,15 @@ jobs:
       - name: Lint UI
         run: bun run lint:ui
 
+      - name: Lint
+        run: bun run lint
+
+      - name: Changelog outputs match their sources
+        run: bun run changelog:check
+
+      - name: Tests
+        run: bun run test
+
       - name: Test patched composer behavior
         run: |
           bun test packages/ui/src/components/chat/composer/editor/__tests__/nativeTextarea.test.ts
