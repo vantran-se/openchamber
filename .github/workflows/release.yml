@@ -1,4 +1,4 @@
-name: Release npm package
+name: Release fork web package
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g., 1.22.1)"
+        description: "Version to release (e.g., 1.24.3)"
         required: true
         type: string
       dry_run:
@@ -68,19 +68,22 @@ jobs:
           npm pkg set name=@vantran-se/openchamber-web
           npm pkg set repository.type=git repository.url=git+https://github.com/vantran-se/openchamber.git
 
-      - name: Validate
+      - name: Validate fork iOS patches
         run: |
           bun run type-check:ui
           bun run lint:ui
           bun test packages/ui/src/components/chat/composer/editor/__tests__/nativeTextarea.test.ts
           bun test packages/ui/src/components/chat/composer/editor/__tests__/dom.test.ts
 
+      - name: Build SDK dependency
+        run: bun run --cwd packages/sdk build
+
       - name: Build web package
         run: OPENCHAMBER_PACKAGE_NAME=@vantran-se/openchamber-web bun run build:web
 
       - name: Create package tarball
         working-directory: packages/web
-        run: npm pack
+        run: bun pm pack
 
       - name: Publish to npm
         if: ${{ github.event.inputs.dry_run != 'true' }}
