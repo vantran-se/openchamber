@@ -67,6 +67,7 @@ jobs:
         run: |
           npm pkg set name=@vantran-se/openchamber-web
           npm pkg set repository.type=git repository.url=git+https://github.com/vantran-se/openchamber.git
+          npm pkg set dependencies.@openchamber/sdk=1.24.2
 
       - name: Validate fork iOS patches
         run: |
