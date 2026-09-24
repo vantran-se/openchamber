@@ -417,7 +417,12 @@ mostly not state machines but corrections for specific platform behaviors:
 mobile browsers dismissing the keyboard before a tap's click lands, iOS
 refusing programmatic focus outside a gesture, WebKit leaving the layout
 viewport panned after the keyboard hides, overlay chains handing off through a
-frame where nothing is open.
+frame where nothing is open. Draft screens and Android chat fixed-pin the form
+to the visible keyboard boundary. iOS standalone chat deliberately keeps it in
+normal flow: moving the native textarea into a fixed layer can leave WebKit's
+text and hit-test layers at the old coordinates, splitting the editor from its
+text and controls. It calls `scrollIntoView` only when the smaller of the visual
+and layout viewport boundaries shows that the form is obscured.
 
 Typed text and salvage text shown after a failed dictation use the same measured
 line and screen-height limits. Once the viewport reports usable space, content

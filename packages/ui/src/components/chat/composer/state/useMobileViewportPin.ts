@@ -16,6 +16,7 @@ import React from 'react';
 
 import { isCapacitorApp } from '@/lib/platform';
 import type { ComposerEditorHandle } from '../editor/ComposerEditor';
+import { getMobileComposerViewportMode, isComposerObscured } from './mobileViewportPolicy';
 
 // Android mobile browsers are the pan-mode holdouts this pin exists for on
 // the CHAT screen too: interactive-widget=resizes-content is ignored by a
@@ -108,17 +109,46 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
         };
     }, [editorRef, formRef, isFullscreen, isMobile]);
 
-    // Keyboard up: anchor the normal-height composer to the visible bottom.
-    // Draft screen on every mobile browser; chat screen on Android and in an
-    // installed PWA, where focused-field reveal cannot be relied on after a
-    // keyboard close and reopen.
+    // Keyboard up: draft screens and Android chat need fixed pinning. iOS
+    // standalone chat must remain in flow: WebKit can draw the textarea's
+    // native text and hit-test layers at its pre-fixed coordinates, splitting
+    // the visible editor from typing and making the send button miss taps.
     React.useLayoutEffect(() => {
         if (!isMobile || isCapacitorApp()) return;
         if (isFullscreen || !isFocused) return;
-        if (!isDraftScreen && !isAndroidBrowser() && !isStandaloneBrowser()) return;
         const vv = window.visualViewport;
         const form = formRef.current;
         if (!vv || !form) return;
+
+        const mode = getMobileComposerViewportMode({
+            isDraftScreen,
+            isAndroidBrowser: isAndroidBrowser(),
+            isStandaloneBrowser: isStandaloneBrowser(),
+        });
+        if (mode === 'native') return;
+
+        if (mode === 'reveal-if-obscured') {
+            const reveal = () => {
+                const formBottom = form.getBoundingClientRect().bottom;
+                const visualViewportBottom = vv.offsetTop + vv.height;
+                const layoutViewportBottom = document.documentElement.clientHeight;
+                if (isComposerObscured(formBottom, visualViewportBottom, layoutViewportBottom)) {
+                    form.scrollIntoView({ block: 'end' });
+                }
+            };
+
+            reveal();
+            vv.addEventListener('resize', reveal);
+            vv.addEventListener('scroll', reveal);
+            window.addEventListener('resize', reveal);
+            window.addEventListener('scroll', reveal, true);
+            return () => {
+                vv.removeEventListener('resize', reveal);
+                vv.removeEventListener('scroll', reveal);
+                window.removeEventListener('resize', reveal);
+                window.removeEventListener('scroll', reveal, true);
+            };
+        }
 
         // Keep the in-flow horizontal geometry (page paddings) while fixed.
         const rect = form.getBoundingClientRect();
@@ -134,13 +164,6 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
         let lastTop = Number.NaN;
         let frame = 0;
         const track = () => {
-            // iOS standalone (PWA) can serve stale visualViewport metrics after
-            // the keyboard rises (full pre-keyboard height, intermittently),
-            // parking the form behind the keyboard. When interactive-widget
-            // resizes the layout viewport, documentElement.clientHeight is the
-            // true above-keyboard bottom — anchor to whichever is smaller. In
-            // pan-mode browsers clientHeight stays full height, so the min
-            // keeps the visual-viewport anchor there.
             const layoutBottom = document.documentElement.clientHeight;
             const vvBottom = vv.offsetTop + vv.height;
             const top = Math.max(0, Math.floor(Math.min(vvBottom, layoutBottom) - form.offsetHeight));
