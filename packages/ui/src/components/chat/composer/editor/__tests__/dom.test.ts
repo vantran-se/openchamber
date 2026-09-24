@@ -20,6 +20,6 @@ test('focuses the CodeMirror chat input content', () => {
 
     focusChatInput();
 
-    expect(selector).toBe('[data-chat-input="true"] .cm-content');
+    expect(selector).toBe('[data-chat-input="true"] .cm-content, [data-chat-input="true"] textarea');
     expect(focused).toBe(true);
 });

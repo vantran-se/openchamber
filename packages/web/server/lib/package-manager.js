@@ -9,11 +9,12 @@ import { fetchUpdateNotes } from './changelog/update-notes.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PACKAGE_NAME = '@openchamber/web';
+const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}`;
+const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2F')}`;
 const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
 const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
+const FORK_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
 let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
@@ -668,6 +669,20 @@ export function getUpdateCommand(pm = detectPackageManager()) {
   }
 }
 
+function getUpdateInvocation(pm = detectPackageManager()) {
+  const command = resolvePackageManagerCommand(pm);
+  switch (pm) {
+    case 'pnpm':
+      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+    case 'yarn':
+      return { command, args: ['global', 'add', `${PACKAGE_NAME}@latest`] };
+    case 'bun':
+      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+    default:
+      return { command, args: ['install', '-g', `${PACKAGE_NAME}@latest`] };
+  }
+}
+
 /**
  * Get current installed version from package.json
  */
@@ -751,14 +766,30 @@ export async function checkForUpdates(options = {}) {
   if (currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
-      if (remote.available && appType === 'web') {
-        const npmLatest = await getLatestVersion();
-        if (!npmLatest || compareVersions(npmLatest, remote.version) < 0) {
-          remote.available = false;
-        }
+      if (appType !== 'web') {
+        return {
+          ...remote,
+          packageManager: pm,
+          updateCommand: 'openchamber update',
+        };
       }
+
+      const latestVersion = await getLatestVersion();
+      if (!latestVersion) {
+        return {
+          available: false,
+          currentVersion,
+          error: 'Unable to determine versions',
+        };
+      }
+
+      const available = compareVersions(latestVersion, currentVersion) > 0;
       return {
-        ...remote,
+        available,
+        version: latestVersion,
+        currentVersion,
+        body: available && remote.version === latestVersion ? remote.body : undefined,
+        releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
         packageManager: pm,
         updateCommand: 'openchamber update',
       };
@@ -790,7 +821,7 @@ export async function checkForUpdates(options = {}) {
     version: latestVersion,
     currentVersion,
     body: changelog,
-    releaseUrl: `${GITHUB_RELEASES_URL}/tag/v${latestVersion}`,
+    releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
     downloadUrl,
     packageManager: pm,
     // Show our CLI command, not raw package manager command
@@ -803,14 +834,14 @@ export async function checkForUpdates(options = {}) {
  */
 export function executeUpdate(pm = detectPackageManager(), options = {}) {
   const command = getUpdateCommand(pm);
+  const invocation = getUpdateInvocation(pm);
   if (!options?.silent) {
     console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
     console.log(`Running: ${command}`);
   }
 
-  const result = spawnSync(command, {
+  const result = spawnSync(invocation.command, invocation.args, {
     stdio: 'inherit',
-    shell: true,
     ...getSpawnSyncBaseOptions(),
   });
 

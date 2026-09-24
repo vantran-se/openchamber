@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 
 // Mock child_process to prevent real spawnSync calls that would hang in tests
 vi.mock('node:child_process', () => ({
@@ -11,6 +12,7 @@ const {
   detectPackageManager,
   executeUpdate,
   getCurrentVersion,
+  getUpdateCommand,
 } = await import('./package-manager.js');
 
 /** Helper: create a fetch mock that routes by URL pattern */
@@ -36,6 +38,22 @@ function createFetchMock() {
 
   return mock;
 }
+
+describe('fork package update command', () => {
+  it('targets the published fork without a runtime environment override', () => {
+    expect(getUpdateCommand('npm')).toBe('npm install -g @vantran-se/openchamber-web@latest');
+  });
+
+  it('executes the package manager without a shell', () => {
+    spawnSync.mockClear();
+    executeUpdate('npm', { silent: true });
+    expect(spawnSync).toHaveBeenCalledWith(
+      'npm',
+      ['install', '-g', '@vantran-se/openchamber-web@latest'],
+      expect.not.objectContaining({ shell: true }),
+    );
+  });
+});
 
 describe('checkForUpdates', () => {
   let fetchMock;

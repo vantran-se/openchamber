@@ -15,6 +15,7 @@ import { FILLER_PROGRAM } from './tools-filler.js';
 // Where the filler puts the tarballs of a packed source. It is a tmpfs, so they vanish with the filler.
 export const TOOLS_STAGING_PATH = '/tmp/openchamber-fill';
 
+const WEB_PACKAGE_NAME = '@vantran-se/openchamber-web';
 const WEB_TARBALL_NAME = 'openchamber-web.tgz';
 const SDK_TARBALL_NAME = 'openchamber-sdk.tgz';
 
@@ -56,7 +57,7 @@ const requireRevision = (value) => {
 const openCodePackages = (version) => ({ '@opencode/cli': version, '@opencode/plugin': version });
 
 /**
- * The versions a released host installs: its own `@openchamber/web`, and OpenCode at the
+ * The versions a released host installs: its own web package, and OpenCode at the
  * version of the `@opencode/client` this server was built against.
  */
 export function readHostToolVersions(packageJsonUrl = new URL('../../../package.json', import.meta.url)) {
@@ -67,14 +68,14 @@ export function readHostToolVersions(packageJsonUrl = new URL('../../../package.
     throw new SpaceError('tools_versions_unreadable', `Could not read the package.json of the OpenChamber server: ${error.message}`);
   }
   return {
-    webVersion: requireVersion(manifest.version, '@openchamber/web'),
+    webVersion: requireVersion(manifest.version, WEB_PACKAGE_NAME),
     openCodeVersion: requireVersion(manifest.dependencies?.['@opencode/client'], 'OpenCode'),
   };
 }
 
 export function createRegistryToolsSource({ webVersion, openCodeVersion, revision = '' }) {
   const packages = {
-    '@openchamber/web': requireVersion(webVersion, '@openchamber/web'),
+    [WEB_PACKAGE_NAME]: requireVersion(webVersion, WEB_PACKAGE_NAME),
     ...openCodePackages(requireVersion(openCodeVersion, 'OpenCode')),
   };
   return finishSource({
