@@ -422,7 +422,9 @@ to the visible keyboard boundary. iOS standalone chat deliberately keeps it in
 normal flow: moving the native textarea into a fixed layer can leave WebKit's
 text and hit-test layers at the old coordinates, splitting the editor from its
 text and controls. It calls `scrollIntoView` only when the smaller of the visual
-and layout viewport boundaries shows that the form is obscured.
+and layout viewport boundaries shows that the form is obscured, records every
+ancestor's scroll position first, and restores those positions when the keyboard
+closes so WebKit cannot leave the composer floating at its keyboard-open height.
 
 Typed text and salvage text shown after a failed dictation use the same measured
 line and screen-height limits. Once the viewport reports usable space, content

@@ -17,6 +17,10 @@ import React from 'react';
 import { isCapacitorApp } from '@/lib/platform';
 import type { ComposerEditorHandle } from '../editor/ComposerEditor';
 import { getMobileComposerViewportMode, isComposerObscured } from './mobileViewportPolicy';
+import {
+    captureComposerAncestorScroll,
+    createComposerScrollRestore,
+} from './mobileViewportScroll';
 
 // Android mobile browsers are the pan-mode holdouts this pin exists for on
 // the CHAT screen too: interactive-widget=resizes-content is ignored by a
@@ -128,11 +132,21 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
         if (mode === 'native') return;
 
         if (mode === 'reveal-if-obscured') {
+            const ancestorScroll = captureComposerAncestorScroll(form);
+            const restoreAfterKeyboard = createComposerScrollRestore(
+                ancestorScroll,
+                () => editorRef.current?.isFocused() === true,
+                (callback) => {
+                    window.setTimeout(callback, 350);
+                },
+            );
+            let didReveal = false;
             const reveal = () => {
                 const formBottom = form.getBoundingClientRect().bottom;
                 const visualViewportBottom = vv.offsetTop + vv.height;
                 const layoutViewportBottom = document.documentElement.clientHeight;
                 if (isComposerObscured(formBottom, visualViewportBottom, layoutViewportBottom)) {
+                    didReveal = true;
                     form.scrollIntoView({ block: 'end' });
                 }
             };
@@ -147,6 +161,14 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
                 vv.removeEventListener('scroll', reveal);
                 window.removeEventListener('resize', reveal);
                 window.removeEventListener('scroll', reveal, true);
+                if (!didReveal) return;
+
+                // scrollIntoView may scroll the PWA's nested shell instead of
+                // the window. Put every ancestor back where it was once the
+                // keyboard closes, then repeat after WebKit settles its exit.
+                // An authoritative focus check protects rapid refocus and
+                // fullscreen transitions from restoring stale geometry.
+                restoreAfterKeyboard();
             };
         }
 
@@ -179,5 +201,5 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
             cancelAnimationFrame(frame);
             releaseForm(form);
         };
-    }, [formRef, isDraftScreen, isFocused, isFullscreen, isMobile]);
+    }, [editorRef, formRef, isDraftScreen, isFocused, isFullscreen, isMobile]);
 }
