@@ -18,6 +18,17 @@ Or install manually: `bun add -g @openchamber/web` (or npm, pnpm, yarn).
 
 > **Prerequisites:** [OpenCode CLI](https://opencode.ai) installed, Node.js 22+.
 
+Start OpenCode first, then OpenChamber in another terminal:
+
+```bash
+opencode
+openchamber
+```
+
+Both clients use the same local OpenCode service, sessions, and live events. Normal local use does not require `opencode serve`, an OpenCode port, or skip-start configuration. Stopping OpenChamber Web leaves OpenCode, the TUI, and current work running.
+
+Shared Web does not install OpenChamber managed tools. Those tools remain available in Electron Desktop's managed OpenCode child.
+
 ## Usage
 
 ```bash
@@ -41,20 +52,14 @@ openchamber connect-url --port 3000  # Add this server to OpenChamber Desktop
 openchamber connect-url --server http://host:3000 --qr
 openchamber connect-url --port 3000 --qr
 openchamber logs                     # Follow latest instance logs
-OPENCODE_PORT=4096 OPENCODE_SKIP_START=true openchamber                    # Connect to external OpenCode server
-OPENCODE_HOST=https://myhost:4096 OPENCODE_SKIP_START=true openchamber  # Connect via custom host/HTTPS
-openchamber stop                     # Stop server
+OPENCODE_HOST=https://myhost:4096 openchamber # Connect to an external OpenCode server
+openchamber stop                     # Stop Web; OpenCode and the TUI keep running
 openchamber update                   # Update to latest version
 ```
 
 `startup enable` snapshots your current environment into the native service so startup behaves like you launched `openchamber` from the same shell. This preserves provider tokens, PATH, SSH agent settings, and other CLI auth/config env vars. Use `--no-env-snapshot` for a minimal service env.
 
-When OpenChamber launches the local OpenCode server, it also registers a native
-`openchamber` agent tool for project, session, and scheduled-task orchestration.
-The tool is not injected when connecting to an external OpenCode server.
-Behavior settings can optionally inject a managed system-prompt optimizer on
-the next OpenCode restart. It is disabled by default and is not available for
-external OpenCode servers.
+Electron Desktop keeps its managed OpenCode child and environment-backed OpenChamber tools. Ordinary Web does not install or advertise those tools. An external endpoint selected with `OPENCODE_HOST` may have user-configured tools, but OpenChamber does not install or guarantee them.
 
 ### Tunnel behavior notes
 
@@ -101,35 +106,23 @@ Generating a client token does not automatically password-protect the hosted bro
 <summary>Connect to external OpenCode server</summary>
 
 ```bash
-OPENCODE_PORT=4096 OPENCODE_SKIP_START=true openchamber
-OPENCODE_HOST=https://myhost:4096 OPENCODE_SKIP_START=true openchamber
+OPENCODE_HOST=https://myhost:4096 openchamber
 ```
+
+`OPENCODE_HOST` overrides shared local discovery. Web treats that endpoint as externally owned: it connects API and event streams but never starts, stops, or restarts the endpoint. OpenChamber managed tools are not guaranteed there.
 
 | Variable | Description |
 |----------|-------------|
-| `OPENCODE_HOST` | Full base URL of external server (overrides `OPENCODE_PORT`) |
-| `OPENCODE_PORT` | Port of external server |
-| `OPENCODE_SKIP_START` | Skip starting embedded OpenCode server |
-| `OPENCHAMBER_OPENCODE_HOSTNAME` | Bind hostname for managed OpenCode server (default: `127.0.0.1`, use `0.0.0.0` for LAN/remote access — trusted networks only). Invalid values are rejected with an error and fall back to loopback |
-| `OPENCHAMBER_HOST` | Bind hostname for the OpenChamber web server (default: `127.0.0.1`; use `0.0.0.0` for LAN/remote access — trusted networks only) |
+| `OPENCODE_HOST` | Full base URL of an externally owned OpenCode server |
+| `OPENCHAMBER_HOST` | Bind hostname for the OpenChamber web server (default: `127.0.0.1`; use `0.0.0.0` for LAN/remote access on trusted networks) |
 | `OPENCHAMBER_VERBOSE_REQUEST_LOGS` | Set to `true` to log every HTTP request; disabled by default to keep user logs small |
 | `OPENCHAMBER_SKIP_API_COMPRESSION` | Set to `true` to disable gzip compression for `/api/*` responses |
-| `OPENCHAMBER_COMPRESS_API` | Set to `true` to force `/api/*` compression, or `false` to disable it. Desktop runtime disables API compression by default to reduce local sidecar CPU use |
+| `OPENCHAMBER_COMPRESS_API` | Set to `true` to force `/api/*` compression, or `false` to disable it. Desktop disables API compression by default to reduce local sidecar CPU use |
 | `OPENCHAMBER_FS_UPLOAD_MAX_BYTES` | Maximum file upload size in bytes (default: 100 MiB) |
 | `OPENCHAMBER_TERMINAL_SHELL` | Preferred terminal shell executable used by the `Auto` setting before platform defaults |
 
 </details>
 
-<details>
-<summary>Bind managed OpenCode to LAN / Tailscale</summary>
-
-```bash
-OPENCHAMBER_OPENCODE_HOSTNAME=0.0.0.0 openchamber --port 3000
-```
-
-**Security note:** binding to `0.0.0.0` exposes the server on all network interfaces — use only on trusted networks and protect with firewall rules or `--ui-password`.
-
-</details>
 
 **Optional env vars:**
 ```yaml
@@ -214,7 +207,6 @@ After=opencode.service
 Type=simple
 ExecStart=openchamber serve --port 3000 --host 0.0.0.0 --ui-password your-password --foreground
 Environment="OPENCODE_HOST=http://localhost:4095"
-Environment="OPENCODE_SKIP_START=true"
 Restart=on-failure
 RestartSec=5
 

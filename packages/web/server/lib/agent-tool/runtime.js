@@ -167,6 +167,40 @@ const resolveConcreteBoundAddress = (value) => {
  * answer with an empty completion instead of an error, and the `oneOf` branches
  * are what carry the per-action descriptions the model reads.
  */
+const createEnvironmentExecutionSource = (name) => `const endpoint = process.env.OPENCHAMBER_AGENT_TOOL_URL
+        const token = process.env.OPENCHAMBER_AGENT_TOOL_TOKEN
+        const callbackHeaders = {}
+        if (!endpoint || !token) {
+          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: "OpenChamber managed tool connection is unavailable" } })
+        }
+
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer " + token,
+              "content-type": "application/json",
+              ...callbackHeaders,
+            },
+            // OpenCode 2 no longer hands a tool its session directory, so the
+            // session id goes over instead and OpenChamber resolves the
+            // directory on its own side. The signal fires when the session is
+            // aborted, so the OpenChamber side stops the action too.
+            body: JSON.stringify({ input: args, sessionID: context.sessionID, tool: ${JSON.stringify(name)} }),
+            signal: context.signal,
+          })
+          const content = await response.text()
+          let result = null
+          try { result = JSON.parse(content) } catch {}
+          const valid = result?.schemaVersion === ${TOOL_SCHEMA_VERSION} && typeof result?.ok === "boolean" && typeof result?.action === "string"
+          await progress({ ok: valid && result.ok === true })
+          if (valid) return { content, metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: result.ok === true } } }
+          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: "OpenChamber returned an invalid response", kind: "runtime", status: response.status } })
+        } catch (error) {
+          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: error instanceof Error ? error.message : String(error), kind: "runtime" } })
+        }`;
+
+
 const createToolEntry = ({ name, description, definitions, parameters }) => String.raw`    tools.add({
       name: ${JSON.stringify(name)},
       description: ${JSON.stringify(description)},
@@ -199,8 +233,6 @@ const createToolEntry = ({ name, description, definitions, parameters }) => Stri
           },
         })
         await progress()
-        const endpoint = process.env.OPENCHAMBER_AGENT_TOOL_URL
-        const token = process.env.OPENCHAMBER_AGENT_TOOL_TOKEN
         // No output schema is declared, so a result must never carry an output
         // field: OpenCode rejects that with "Tool result declared output
         // without an output schema". The envelope travels as text content.
@@ -208,39 +240,17 @@ const createToolEntry = ({ name, description, definitions, parameters }) => Stri
           content: JSON.stringify(payload),
           metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: false } },
         })
-        if (!endpoint || !token) {
-          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: "OpenChamber managed tool connection is unavailable" } })
-        }
-
-        try {
-          const response = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              authorization: "Bearer " + token,
-              "content-type": "application/json",
-            },
-            // OpenCode 2 no longer hands a tool its session directory, so the
-            // session id goes over instead and OpenChamber resolves the
-            // directory on its own side. The signal fires when the session is
-            // aborted, so the OpenChamber side stops the action too.
-            body: JSON.stringify({ input: args, sessionID: context.sessionID, tool: ${JSON.stringify(name)} }),
-            signal: context.signal,
-          })
-          const content = await response.text()
-          let result = null
-          try { result = JSON.parse(content) } catch {}
-          const valid = result?.schemaVersion === ${TOOL_SCHEMA_VERSION} && typeof result?.ok === "boolean" && typeof result?.action === "string"
-          await progress({ ok: valid && result.ok === true })
-          if (valid) return { content, metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: result.ok === true } } }
-          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: "OpenChamber returned an invalid response", kind: "runtime", status: response.status } })
-        } catch (error) {
-          return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: error instanceof Error ? error.message : String(error), kind: "runtime" } })
-        }
+        ${createEnvironmentExecutionSource(name)}
       },
     })
 `;
 
-const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
+
+export const createPluginSource = ({
+  includeControl,
+  includeWeb,
+  includeMemory,
+}) => {
   const entries = [];
   if (includeControl) {
     entries.push(createToolEntry({
@@ -267,15 +277,13 @@ const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
     }));
   }
 
-  // The callback carries the per-child token over plain HTTP. With a proxy in
-  // the child's environment, fetch would hand a non-loopback callback, token
-  // included, to that proxy, and no per-request option turns that off. The
-  // exemption is added inside the child because only there is the final
-  // NO_PROXY, merged from the shell and server environments, visible.
-  return `const exemptCallbackFromProxy = () => {
-  const endpoint = process.env.OPENCHAMBER_AGENT_TOOL_URL
-  if (!endpoint || !URL.canParse(endpoint)) return
-  const host = new URL(endpoint).hostname.replace(/^\\[|\\]$/g, "")
+  // The callback carries a bearer token over plain HTTP. With a proxy in the
+  // OpenCode environment, fetch could hand a non-loopback callback and token to
+  // that proxy. Add the callback host to both proxy exemption variables before
+  // a request.
+  return `const exemptCallbackFromProxy = (callbackEndpoint = process.env.OPENCHAMBER_AGENT_TOOL_URL) => {
+  if (!callbackEndpoint || !URL.canParse(callbackEndpoint)) return
+  const host = new URL(callbackEndpoint).hostname.replace(/^\\[|\\]$/g, "")
   for (const key of ["NO_PROXY", "no_proxy"]) {
     const entries = (process.env[key] || "").split(",").map((entry) => entry.trim()).filter(Boolean)
     if (!entries.includes(host)) process.env[key] = [...entries, host].join(",")
@@ -295,7 +303,7 @@ ${entries.join('')}    })
 
 // A configured plugin has to be a directory carrying a package.json that
 // resolves an entrypoint; OpenCode skips a plain .js path.
-const PLUGIN_PACKAGE_JSON = `${JSON.stringify({
+export const AGENT_TOOL_PLUGIN_PACKAGE_JSON = `${JSON.stringify({
   name: 'openchamber-agent-tool',
   version: '0.0.0',
   private: true,
@@ -334,8 +342,12 @@ export const createAgentToolRuntime = (dependencies) => {
       throw new Error('At least one OpenChamber managed tool must be enabled to inject the plugin');
     }
     await fsPromises.mkdir(pluginDirectory, { recursive: true });
-    await fsPromises.writeFile(pluginManifestPath, PLUGIN_PACKAGE_JSON, { mode: 0o600 });
-    await fsPromises.writeFile(pluginPath, createPluginSource({ includeControl, includeWeb, includeMemory }), { mode: 0o600 });
+    await fsPromises.writeFile(pluginManifestPath, AGENT_TOOL_PLUGIN_PACKAGE_JSON, { mode: 0o600 });
+    await fsPromises.writeFile(pluginPath, createPluginSource({
+      includeControl,
+      includeWeb,
+      includeMemory,
+    }), { mode: 0o600 });
     return pluginDirectory;
   };
 
@@ -371,14 +383,20 @@ export const createAgentToolRuntime = (dependencies) => {
     return boundAddress !== null && normalizeAddress(value) === boundAddress;
   };
 
-  const authorize = (req) => {
-    if (!activeToken || !isSameMachineAddress(req.socket?.remoteAddress)) return false;
+  const verifyBearer = (req, token) => {
+    if (!token) return false;
     const header = asNonEmptyString(req.headers?.authorization);
     if (!header?.startsWith('Bearer ')) return false;
     const provided = Buffer.from(header.slice(7));
-    const expected = Buffer.from(activeToken);
+    const expected = Buffer.from(token);
     return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
   };
+
+
+  const authorizeManagedChild = (req) => (
+    isSameMachineAddress(req.socket?.remoteAddress) && verifyBearer(req, activeToken)
+  );
+
 
   const execute = async (payload = {}, options = {}) => {
     const requested = asNonEmptyString(payload.input?.action);
@@ -455,8 +473,9 @@ export const createAgentToolRuntime = (dependencies) => {
   };
 
   const registerRoutes = (app, express) => {
+
     app.post('/api/openchamber/agent-tool', express.json({ limit: '1mb' }), async (req, res) => {
-      if (!authorize(req)) return res.status(401).json({ error: 'Unauthorized' });
+      if (!authorizeManagedChild(req)) return res.status(401).json({ error: 'Unauthorized' });
       const controller = new AbortController();
       const abortOnDisconnect = () => {
         if (!res.writableEnded) controller.abort();

@@ -182,8 +182,7 @@ export function createMessageStreamWsRuntime({
      * `Last-Event-ID` and re-establish the stream against the new port.
      */
     rebindUpstream() {
-      globalHub.stop();
-      globalHub.start();
+      globalHub.rebind();
       for (const socket of Array.from(directorySockets)) {
         try {
           socket.close(1012, 'OpenCode upstream restarted');

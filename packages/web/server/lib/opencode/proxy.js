@@ -477,18 +477,15 @@ export const registerOpenCodeProxy = (app, deps) => {
   const resolveProxyTarget = () => {
     const runtimeState = getRuntime();
 
-    // `buildOpenCodeUrl` throws while the port is unknown, and the port is
-    // nulled on several runtime paths (health-check failure, failed restart),
-    // not just cold start. Checking first keeps a degraded OpenCode from
-    // making every proxied request pay for a thrown-and-caught exception.
-    if (runtimeState.openCodePort) {
-      try {
-        const resolved = normalizeProxyTarget(buildOpenCodeUrl('/', ''));
-        if (resolved) {
-          return resolved;
-        }
-      } catch {
+    // The shared-service endpoint can remain authoritative even when it has no
+    // explicit port (for example, HTTPS on its default port). Resolve it before
+    // consulting the legacy runtime snapshot.
+    try {
+      const resolved = normalizeProxyTarget(buildOpenCodeUrl('/', ''));
+      if (resolved) {
+        return resolved;
       }
+    } catch {
     }
 
     const externalBase = normalizeProxyTarget(runtimeState.openCodeBaseUrl);
@@ -973,10 +970,14 @@ export const registerOpenCodeProxy = (app, deps) => {
     router: () => resolveProxyTarget(),
     on: {
       proxyReq: (proxyReq, req) => {
-        // Inject OpenCode auth headers
+        // The proxy middleware starts with browser headers. Never let an
+        // OpenChamber client credential reach OpenCode, even when the active
+        // OpenCode connection itself has no authorization header.
+        proxyReq.removeHeader('authorization');
         const authHeaders = getOpenCodeAuthHeaders();
-        if (authHeaders.Authorization) {
-          proxyReq.setHeader('Authorization', authHeaders.Authorization);
+        for (const [key, value] of Object.entries(authHeaders)) {
+          proxyReq.removeHeader(key);
+          proxyReq.setHeader(key, value);
         }
 
         if (req.headers?.['x-opencode-directory-encoding'] === 'uri') {

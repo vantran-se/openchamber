@@ -55,6 +55,132 @@ const WARMUP_REQUEST_TIMEOUT_MS = 30000;
 const MANAGED_STDERR_TAIL_MAX_BYTES = 32 * 1024;
 const HEALTH_FAILURE_DETAIL_MAX_LENGTH = 256;
 
+export const resolveOpenCodeConnectionKind = ({ runtime, configuredHost, lifecycleMode }) => {
+  if (configuredHost) return 'explicit-external';
+  if (lifecycleMode === 'managed' || runtime === 'desktop') return 'managed-owned';
+  return 'shared-local';
+};
+
+export const createOpenCodeServerComposition = ({
+  runtime,
+  configuredHost,
+  lifecycleMode,
+  createSharedRuntime,
+  createManagedPluginRuntime = () => null,
+  getManagedBaseUrl = () => null,
+  getManagedAuthHeaders = () => ({}),
+}) => {
+  const kind = resolveOpenCodeConnectionKind({ runtime, configuredHost, lifecycleMode });
+  if (kind === 'shared-local' && !createSharedRuntime) {
+    throw new Error('Shared OpenCode composition requires a shared runtime factory');
+  }
+  const sharedRuntime = kind === 'shared-local' ? createSharedRuntime() : null;
+  const managedPluginRuntime = kind === 'managed-owned' ? createManagedPluginRuntime() : null;
+  const connection = createOpenCodeConnectionAdapter({
+    kind,
+    sharedRuntime,
+    getManagedBaseUrl,
+    getManagedAuthHeaders,
+  });
+  return { kind, sharedRuntime, managedPluginRuntime, connection };
+};
+
+export const createOpenCodeRecoveryCallbacks = ({
+  resetOpenCodeRuntimeProviders,
+  rebindUpstream,
+  interruptBusySessionsAfterRestart,
+  broadcastUiNotification,
+}) => ({
+  onManagedRestarted() {
+    resetOpenCodeRuntimeProviders();
+    try {
+      rebindUpstream();
+    } catch (error) {
+      console.warn('Failed to rebind message stream after OpenCode restart:', error?.message ?? error);
+    }
+    try {
+      const { sessionIds } = interruptBusySessionsAfterRestart();
+      if (sessionIds.length === 0) return;
+      const multiple = sessionIds.length > 1;
+      broadcastUiNotification({
+        title: multiple ? 'Chats interrupted' : 'Chat interrupted',
+        body: multiple
+          ? 'OpenCode restarted during running responses. Send a message in each chat to continue.'
+          : 'OpenCode restarted during a running response. Send a message to continue.',
+        tag: 'opencode-restart-interrupted',
+        kind: 'opencode-restart-interrupted',
+        sessionId: sessionIds[0],
+      });
+    } catch (error) {
+      console.warn('Failed to reconcile sessions after OpenCode restart:', error?.message ?? error);
+    }
+  },
+  onSharedRecovered() {
+    resetOpenCodeRuntimeProviders();
+    rebindUpstream();
+  },
+});
+
+export const createOpenCodeLifecycleControls = ({
+  getKind,
+  restartLifecycle,
+  triggerLifecycleHealthCheck,
+  recoverShared,
+  onSharedRecovered,
+}) => {
+  let sharedRecoveryPromise = null;
+  const recover = () => {
+    if (!recoverShared || !onSharedRecovered) {
+      return Promise.reject(new Error('Shared OpenCode recovery is not configured'));
+    }
+    if (!sharedRecoveryPromise) {
+      sharedRecoveryPromise = Promise.resolve()
+        .then(() => recoverShared())
+        .then(() => onSharedRecovered())
+        .finally(() => {
+          sharedRecoveryPromise = null;
+        });
+    }
+    return sharedRecoveryPromise;
+  };
+
+  return {
+    restart: (...args) => (
+      getKind() === 'shared-local' ? recover() : restartLifecycle(...args)
+    ),
+    triggerHealthCheck: (...args) => {
+      if (getKind() !== 'shared-local') {
+        return triggerLifecycleHealthCheck(...args);
+      }
+      return recover().catch((error) => {
+        console.warn('Failed to recover shared OpenCode service:', error?.message ?? error);
+      });
+    },
+  };
+};
+
+export const createOpenCodeConnectionAdapter = ({
+  kind,
+  sharedRuntime = null,
+  getManagedBaseUrl = () => null,
+  getManagedAuthHeaders = () => ({}),
+}) => {
+  if (kind === 'shared-local' && !sharedRuntime) {
+    throw new Error('Shared OpenCode connection requires a shared service runtime');
+  }
+
+  return {
+    getOpenCodeConnectionKind: () => kind,
+    getOpenCodeBaseUrl: () => (
+      kind === 'shared-local' ? sharedRuntime.getBaseUrl() : getManagedBaseUrl()
+    ),
+    getOpenCodeAuthHeaders: () => (
+      kind === 'shared-local' ? sharedRuntime.getHeaders() : getManagedAuthHeaders()
+    ),
+    ownsOpenCodeProcess: () => kind === 'managed-owned',
+  };
+};
+
 const getBoundedTextTail = (value, maxBytes) => {
   const buffer = Buffer.from(String(value ?? ''));
   if (buffer.byteLength <= maxBytes) return buffer.toString();

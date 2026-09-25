@@ -15,11 +15,14 @@ Command modules implement user-facing commands and preserve output contracts acr
 
 - `commands-serve.js`
   - Implements `openchamber serve`.
-  - Owns OpenCode CLI checks, port resolution, log rotation, PID/instance registry writes, foreground/background server launch, startup summaries, and foreground shutdown behavior.
+  - Owns OpenCode CLI checks, port resolution, log rotation, PID and instance registry writes, foreground or background server launch, startup summaries, and foreground shutdown behavior.
+  - Ordinary Web connects to OpenCode's shared local service. Startup failures use the existing output adapter so JSON remains JSON-only, quiet output stays concise, and non-TTY mode never prompts.
 
 - `commands-lifecycle.js`
   - Implements `openchamber stop` and `openchamber restart`.
   - Owns lifecycle stop/restart semantics, desktop-managed port rejection, unmanaged instance shutdown attempts, PID/instance cleanup, and restart reuse of stored instance options.
+
+Stopping Web shuts down the selected OpenChamber instance but leaves a `shared-local` or `explicit-external` OpenCode service running. OpenCode process teardown belongs only to the Desktop `managed-owned` runtime.
 
 - `commands-status.js`
   - Implements `openchamber status`.

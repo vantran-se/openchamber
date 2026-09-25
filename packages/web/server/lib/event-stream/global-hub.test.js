@@ -25,7 +25,7 @@ it('bounds a contiguous replay suffix by UTF-8 bytes and event count', async () 
   } finally { hub.stop(); }
 });
 
-function createSseResponse({ blocks = [] } = {}) {
+function createSseResponse({ blocks = [], signal, holdOpen = false } = {}) {
   const encoder = new TextEncoder();
   let index = 0;
 
@@ -38,7 +38,18 @@ function createSseResponse({ blocks = [] } = {}) {
             if (index < blocks.length) {
               return { value: encoder.encode(blocks[index++]), done: false };
             }
-            return { value: undefined, done: true };
+            if (!holdOpen) {
+              return { value: undefined, done: true };
+            }
+            return new Promise((_resolve, reject) => {
+              const onAbort = () => {
+                signal.removeEventListener('abort', onAbort);
+                const error = new Error('Aborted');
+                error.name = 'AbortError';
+                reject(error);
+              };
+              signal.addEventListener('abort', onAbort, { once: true });
+            });
           },
         };
       },
@@ -224,6 +235,86 @@ describe('delta coalescing in the global hub', () => {
 });
 
 describe('createGlobalMessageStreamHub', () => {
+  it('uses the replacement service endpoint and auth after rebind', async () => {
+    let generation = 0;
+    const urls = ['http://127.0.0.1:4096/api/event', 'http://127.0.0.1:5096/api/event'];
+    const auth = ['Basic first', 'Basic second'];
+    const fetchImpl = vi.fn(async (_url, options) => createSseResponse({
+      signal: options.signal,
+      holdOpen: true,
+    }));
+    const hub = createGlobalMessageStreamHub({
+      buildOpenCodeUrl: () => urls[generation],
+      getOpenCodeAuthHeaders: () => ({ Authorization: auth[generation] }),
+      fetchImpl,
+      upstreamReconnectDelayMs: 60_000,
+    });
+
+    try {
+      hub.start();
+      await waitForAssertion(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+
+      generation = 1;
+      hub.rebind();
+
+      await waitForAssertion(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+      expect(fetchImpl).toHaveBeenLastCalledWith(urls[1], expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: auth[1] }),
+      }));
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it('ignores a retired reader disconnect that completes after its replacement connects', async () => {
+    let finishRetiredRead;
+    let fetchCount = 0;
+    const statuses = [];
+    const fetchImpl = vi.fn(async (_url, options) => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader() {
+              return {
+                read() {
+                  return new Promise((resolve) => {
+                    finishRetiredRead = () => resolve({ value: undefined, done: true });
+                  });
+                },
+              };
+            },
+          },
+        };
+      }
+      return createSseResponse({ signal: options.signal, holdOpen: true });
+    });
+    const hub = createGlobalMessageStreamHub({
+      buildOpenCodeUrl: (pathname) => `http://127.0.0.1:4096${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      fetchImpl,
+      upstreamReconnectDelayMs: 60_000,
+    });
+    hub.subscribeStatus((status) => statuses.push(status.type));
+
+    try {
+      hub.start();
+      await waitForAssertion(() => expect(statuses).toEqual(['connect']));
+
+      hub.rebind();
+      await waitForAssertion(() => expect(statuses).toEqual(['connect', 'connect']));
+      expect(hub.isConnected()).toBe(true);
+
+      finishRetiredRead();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(statuses).toEqual(['connect', 'connect']);
+      expect(hub.isConnected()).toBe(true);
+    } finally {
+      hub.stop();
+    }
+  });
+
   it('continues fanout when an event subscriber throws', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const received = [];

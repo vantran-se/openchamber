@@ -3,6 +3,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGlobalMessageStreamHub } from '../event-stream/global-hub.js';
 import { createOpenCodeWatcherRuntime } from './watcher.js';
 
+async function waitForAssertion(assertion) {
+  const deadline = Date.now() + 1000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
+
 function createSseResponse({ blocks = [], signal, holdOpen = false }) {
   const encoder = new TextEncoder();
   let index = 0;
@@ -187,6 +202,45 @@ describe('createOpenCodeWatcherRuntime', () => {
       type: 'session.updated',
       properties: { sessionID: 'ses_1', info: { id: 'ses_1', title: 'New' } },
     });
+  });
+
+  it('keeps its shared subscription across a hub rebind', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    let generation = 0;
+    const payloads = [];
+    const globalEventHub = createGlobalMessageStreamHub({
+      buildOpenCodeUrl: () => `http://127.0.0.1:${generation === 0 ? 4096 : 5096}/api/event`,
+      getOpenCodeAuthHeaders: () => ({ Authorization: generation === 0 ? 'Basic first' : 'Basic second' }),
+      upstreamReconnectDelayMs: 60_000,
+      fetchImpl: async (_url, options) => createSseResponse({
+        signal: options.signal,
+        holdOpen: true,
+        blocks: [generation === 0
+          ? 'data: {"id":"evt-1","type":"server.connected","data":{}}\n\n'
+          : 'data: {"id":"evt-2","type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_1","title":"Recovered"}}\n\n'],
+      }),
+    });
+    const watcher = createOpenCodeWatcherRuntime({
+      waitForOpenCodePort: async () => {},
+      buildOpenCodeUrl: () => '',
+      getOpenCodeAuthHeaders: () => ({}),
+      globalEventHub,
+      onPayload: (payload) => payloads.push(payload),
+    });
+
+    try {
+      await watcher.start();
+      await waitForAssertion(() => expect(payloads.map((payload) => payload.type)).toContain('server.connected'));
+      generation = 1;
+      globalEventHub.rebind();
+      await waitForAssertion(() => expect(payloads).toContainEqual(expect.objectContaining({
+        type: 'session.updated',
+        properties: expect.objectContaining({ sessionID: 'ses_1' }),
+      })));
+    } finally {
+      watcher.stop();
+      globalEventHub.stop();
+    }
   });
 
   it('does not stop a shared global event hub when the watcher stops', async () => {

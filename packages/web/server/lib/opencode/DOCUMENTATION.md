@@ -11,13 +11,14 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/cli-entry-runtime.js`: CLI entrypoint runtime that detects direct execution, parses CLI options, and starts server bootstrap.
 - `packages/web/server/lib/opencode/routes.js`: OpenCode/provider settings and auth-related route registration.
 - `packages/web/server/lib/opencode/v1-migration-topup.js`: re-arms OpenCode's own V1 -> V2 session import for V1 sessions created after that migration already completed; runs only before a managed spawn. See "v1-migration-topup.js" below.
-- `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring). After readiness it warms the most recently used directories (`getWarmupDirectories` dep, sequential and best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open.
+- `packages/web/server/lib/opencode/lifecycle.js`: OpenCode connection policy and the managed process lifecycle runtime. The composition helper selects `explicit-external` when `OPENCODE_HOST` is configured, `managed-owned` for Desktop, and `shared-local` for ordinary Web. The managed path still owns startup, restart, readiness, health monitoring, orphan reaping, credentials, and V1 migration top-up. After readiness it warms the most recently used directories (`getWarmupDirectories` dep, sequential and best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open.
 - `packages/web/server/lib/opencode/provider-env-aliases.js`: mirrors known provider credential env aliases into the managed OpenCode process environment (for example `GEMINI_API_KEY` → `GOOGLE_GENERATIVE_AI_API_KEY`) so OpenCode connection detection and the upstream AI SDK agree on the same key names. Canonical implementation shared by web lifecycle and the VS Code managed spawn path (`packages/vscode/src/provider-env-aliases.ts` re-exports this module).
 - `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime.
 - `packages/web/server/lib/opencode/env-config.js`: OpenCode-related environment variable parsing and validation (host/port/hostname).
 - `packages/web/server/lib/opencode/hmr-state-runtime.js`: HMR-persistent runtime state initialization, auth-state bootstrap, and HMR sync helpers.
 - `packages/web/server/lib/opencode/bootstrap-runtime.js`: base app bootstrap runtime for status/auth/tts/notification/OpenChamber route wiring.
-- `packages/web/server/lib/opencode/network-runtime.js`: OpenCode URL construction, health-probe readiness checks, and API prefix runtime.
+- `packages/web/server/lib/opencode/network-runtime.js`: OpenCode URL construction, health-probe readiness checks, and API prefix runtime. URL and service headers are resolved for every request so shared-service endpoint or credential rotation is immediate; lowercase service `authorization` is normalized to `Authorization` while other service headers are preserved.
+- `packages/web/server/lib/opencode/shared-service-runtime.js`: discovery-first connection used by ordinary Web when no explicit `OPENCODE_HOST` is configured. It probes `/api/info` before accepting an endpoint, refuses to replace an incompatible discovered service, and never owns or stops the shared process. Because the pinned client's discovery hides incompatible and unhealthy registrations, Web checks that the registration file is genuinely absent before calling its destructive `ensure`; an existing hidden registration fails startup untouched. Shared restart and health controls recover the connection, then rebind live event readers so their established reconnect edge repairs authoritative client state without synthetic interruption. Desktop does not instantiate this runtime.
 - `packages/web/server/lib/opencode/project-directory-runtime.js`: request-scoped and settings-backed project directory resolution/validation runtime.
 - `packages/web/server/lib/opencode/config-entity-routes.js`: route registration for agent/command/MCP config orchestration. OpenCode 2 watches these files, so a write is live as soon as it lands and the route answers plain success.
 - `packages/web/server/lib/opencode/websearch-config.js`: writes OpenCode's `websearch` choice (`PUT /api/config/websearch` in `routes.js`; body `{ selection: false | null | "random" | "<provider id>" }`, `null` removes the key, so OpenCode falls back to the answer given in its chat consent form, which it keeps in its own store) to `OPENCODE_CONFIG` when set, else the user config. `GET /api/config/websearch` returns `{ projectPath }`: the project config whose `websearch` overrides that write (OpenCode merges user < project < `OPENCODE_CONFIG`), so Settings disables the choice and names the file instead of letting it snap back; `findWebSearchProjectOverride` in `config-v2.js` holds the rule. The pure transform is `writeWebSearchSelection` in `config-v2.js`, shared with the VS Code bridge (`api:config/websearch`).
@@ -25,18 +26,18 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/snippets.js`: opencode-snippets-compatible snippet file CRUD, discovery, and hashtag expansion.
 - `packages/web/server/lib/opencode/cli-options.js`: CLI/environment option parsing for server startup arguments.
 - `packages/web/server/lib/opencode/core-routes.js`: server status/system routes, auth/access guard routes, and settings utility route registration.
-- `packages/web/server/lib/opencode/shutdown-runtime.js`: graceful shutdown orchestration runtime for watcher/session/guest-services/terminal/process/server teardown.
-- `packages/web/server/lib/opencode/server-startup-runtime.js`: server listen/startup tunnel flow and process/signal handler orchestration runtime.
-- `packages/web/server/lib/opencode/static-routes-runtime.js`: static asset/SPA fallback route registration and manifest route wiring.
-- `packages/web/server/lib/opencode/feature-routes-runtime.js`: feature route composition runtime for dynamic import-backed config/skill/provider route registration.
-- `packages/web/server/lib/opencode/opencode-resolution-runtime.js`: OpenCode binary resolution snapshot runtime for settings routes and diagnostics.
-- `packages/web/server/lib/opencode/upgrade-capability.js`: authoritative upgrade ownership policy for the active OpenCode runtime. Bundled, external, and unresolved runtimes fail closed; only managed non-bundled runtimes delegate upgrades to OpenCode.
-- `packages/web/server/lib/opencode/tunnel-wiring-runtime.js`: tunnel service/routes composition runtime and active-port wiring for main server startup.
-- `packages/web/server/lib/opencode/startup-pipeline-runtime.js`: server startup tail orchestration runtime for terminal/proxy/static/start-listen flow.
+- `packages/web/server/lib/opencode/shutdown-runtime.js`: graceful shutdown orchestration. Only `managed-owned` may close an OpenCode child, kill by port, or wait for port release. Shared and external connections dispose local state only.
+- `packages/web/server/lib/opencode/server-startup-runtime.js`: server listen, startup tunnel flow, and process or signal handler orchestration.
+- `packages/web/server/lib/opencode/static-routes-runtime.js`: static asset and SPA fallback route registration.
+- `packages/web/server/lib/opencode/feature-routes-runtime.js`: feature route composition for dynamic route modules.
+- `packages/web/server/lib/opencode/opencode-resolution-runtime.js`: OpenCode binary resolution snapshot for settings routes and diagnostics.
+- `packages/web/server/lib/opencode/upgrade-capability.js`: upgrade ownership policy. Bundled, external, and unresolved runtimes fail closed; only managed non-bundled runtimes delegate upgrades to OpenCode.
+- `packages/web/server/lib/opencode/tunnel-wiring-runtime.js`: tunnel service and active-port wiring.
+- `packages/web/server/lib/opencode/startup-pipeline-runtime.js`: terminal, proxy, static route, and listen orchestration. Shared Web starts no managed-tool installation or registration step.
 - `packages/web/server/lib/opencode/startup-performance.js`: opt-in startup phase diagnostics with fixed labels and numeric metadata allowlists.
-- `packages/web/server/lib/agent-tool/runtime.js`: managed OpenCode custom-tool materialization, environment injection, same-machine authentication (loopback, or the bound address for a concrete bind), and fixed CLI action dispatch.
-- `packages/web/server/lib/opencode/managed-plugin-config.js`: the `OPENCODE_CONFIG_CONTENT` merge used only on the fallback path, when the user's own environment owns `OPENCODE_CONFIG`.
-- `packages/web/server/lib/opencode/managed-config-file.js`: the managed OpenCode config layer — materializes the enabled OpenChamber plugins (agent tools, system prompt optimizer) and publishes them in a file OpenCode watches.
+- `packages/web/server/lib/agent-tool/runtime.js`: Desktop's custom-tool schema and source generation, managed plugin materialization, environment injection, same-machine authentication, and fixed action dispatch.
+- `packages/web/server/lib/opencode/managed-plugin-config.js`: the `OPENCODE_CONFIG_CONTENT` merge used only when the user's environment owns `OPENCODE_CONFIG`.
+- `packages/web/server/lib/opencode/managed-config-file.js`: Desktop's managed OpenCode config layer for environment-backed OpenChamber tools and the system prompt optimizer.
 
 ### Managed plugins on OpenCode 2.x
 A configured plugin must be a DIRECTORY holding a `package.json` that resolves an
@@ -296,7 +297,8 @@ Installer output is discarded, not forwarded to clients or logs.
 The runtime maintains active-session count incrementally from idempotent activity phase transitions. Upstream stall-timeout and lifecycle health checks read it in O(1); the hourly cleanup removes activity phases older than 24 hours without broadcasting synthetic state transitions. Snapshot generation remains reserved for the session-activity API.
 
 ## Public exports (lifecycle.js)
-- `createOpenCodeLifecycleRuntime(dependencies)`: creates lifecycle runtime for managed/external OpenCode process orchestration. The optional `onOpenCodeRestarted` dependency (default `null`) is fired after a successful managed restart. `index.js` rebinds event-stream readers to the possibly-new port (#2638), then calls `interruptBusySessionsAfterRestart()` and broadcasts one `opencode-restart-interrupted` UI notification when interrupted turns exist (#2943).
+- `createOpenCodeRecoveryCallbacks(dependencies)`: composes the production recovery callbacks used by `index.js`. Managed restart resets providers, rebinds event readers, calls `interruptBusySessionsAfterRestart()`, and broadcasts the existing interruption notification. Shared recovery resets providers and rebinds readers only, leaving authoritative browser reconnect repair to the existing second `ready` edge.
+- `createOpenCodeLifecycleRuntime(dependencies)`: creates lifecycle runtime for managed/external OpenCode process orchestration. The optional `onOpenCodeRestarted` dependency (default `null`) is fired after a successful managed restart. `index.js` supplies the managed callback above.
 - Returned API:
   - `startOpenCode()`
   - `restartOpenCode()`
@@ -396,7 +398,7 @@ ConPTY or Console Window Host behavior.
   - `setupBaseRoutes(app, options)`
 
 ## Public exports (network-runtime.js)
-- `createOpenCodeNetworkRuntime(dependencies)`: creates runtime for OpenCode network and URL concerns.
+- `createOpenCodeNetworkRuntime(dependencies)`: creates runtime for OpenCode network and URL concerns. `getOpenCodeBaseUrl` and `getOpenCodeAuthHeaders` are read at call time; credentials remain request headers and never enter generated URLs.
 - Returned API:
   - `waitForReady(url, timeoutMs?)`
   - `normalizeApiPrefix(prefix)`
@@ -751,15 +753,15 @@ headers }` or v1 `{ npm, options }`. The stored entry is always a
   - `setupProxy(app)`
 
 ## Public exports (shutdown-runtime.js)
-- `createGracefulShutdownRuntime(dependencies)`: creates graceful shutdown runtime for managed OpenCode and web server teardown sequencing.
-- Daemon signals, `POST /api/system/shutdown`, and embedded `stop()` share one shutdown promise. Guest admission closes synchronously before any await. Cleanup stops the relay reconciliation timer, guest viewers, realtime proxy, relay host, dictation worker and session runtimes before draining guest services, including pending starts. Each cleanup is best-effort and runs once per shutdown, including after partial startup. A hard kill still requires the separate crash/SIGKILL recovery work; no persistent registry or boot reaper is provided here.
-- Register TCP connection tracking before the HTTP server starts listening. After stopping owned runtimes and OpenCode, HTTP shutdown closes the listener and all remaining sockets, including WebSocket upgrades and unanswered upgrade requests accepted during cleanup. This prevents client reconnects from holding Desktop open until the HTTP close deadline. Each runtime still owns its protocol cleanup; socket teardown runs afterwards and preserves the existing terminal and process grace periods.
+- `createGracefulShutdownRuntime(dependencies)`: creates graceful shutdown for Web-owned resources and explicit OpenCode process ownership.
+- Daemon signals, `POST /api/system/shutdown`, and embedded `stop()` share one shutdown promise. Guest admission closes before asynchronous cleanup. Each cleanup is best-effort and runs once, including after partial startup. The application-owned global event hub is stopped here after its watcher, so embedded shutdown aborts the upstream event fetch and reconnect loop; watcher and WebSocket bridges do not stop injected hubs.
+- Only `managed-owned` may close the OpenCode child, kill by port, or wait for port release. `shared-local` disposes only local connection state. `explicit-external` performs no OpenCode process teardown. TCP connection tracking closes the Web listener and remaining sockets after owned runtimes stop, while shared or external OpenCode and TUI work continue.
 - Returned API:
   - `gracefulShutdown(options?)`
   - `trackServerConnections(server)`: call once before listening; closed sockets leave the tracking set, and the server close event removes the connection listener.
 
 ## Public exports (server-startup-runtime.js)
-- `createServerStartupRuntime(dependencies)`: creates runtime for server bind/startup tunnel and process handler wiring.
+- `createServerStartupRuntime(dependencies)`: creates runtime for server bind/startup tunnel and process handler wiring. Daemon readiness is emitted only after listener-dependent startup completes. A startup failure sends `openchamber:error`, closes the listener and accepted connections, and rejects startup without a ready event.
 - Returned API:
   - `resolveBindHost(host)`
   - `startListeningAndMaybeTunnel(options)`
@@ -786,13 +788,11 @@ headers }` or v1 `{ npm, options }`. The stored entry is always a
   - `initialize(app, initialPort, hasUiPassword)`
 
 ## Public exports (startup-pipeline-runtime.js)
-- `createStartupPipelineRuntime(dependencies)`: creates runtime for terminal wiring, proxy/bootstrap scheduling, static route registration, and server startup/listen flow.
+- `createStartupPipelineRuntime(dependencies)`: creates terminal, proxy, static route, and server listen orchestration.
 - Returned API:
   - `run(options)`
 
-The pipeline binds the OpenChamber listener and publishes its active port
-before starting managed OpenCode. The managed custom tool therefore receives
-an authoritative loopback callback URL even when OpenChamber binds port `0`.
+The pipeline publishes the listener port before bootstrapping OpenCode, then waits for connection authentication and version validation before daemon readiness. Desktop's generated custom tool therefore receives the correct loopback callback URL even when OpenChamber binds port `0`, while ordinary Web cannot advertise readiness with an unusable shared service. Shared Web does not install a plugin or publish callback registration.
 
 ## Public exports (openchamber-routes.js)
 Browser completion checks use `appType=web&updateStatus=true` to stay on the

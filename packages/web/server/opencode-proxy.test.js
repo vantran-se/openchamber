@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import express from 'express';
 import path from 'path';
 
+import { createOpenCodeConnectionAdapter } from './lib/opencode/lifecycle.js';
+import { createOpenCodeNetworkRuntime } from './lib/opencode/network-runtime.js';
 import { createSseBoundaryTracker, registerOpenCodeProxy, writeSseChunkWithBackpressure } from './lib/opencode/proxy.js';
 
 const listen = (app, host = '127.0.0.1') => new Promise((resolve, reject) => {
@@ -26,6 +28,7 @@ const closeServer = (server) => new Promise((resolve, reject) => {
 
 describe('OpenCode proxy SSE forwarding', () => {
   let upstreamServer;
+  let replacementUpstreamServer;
   let proxyServer;
   const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
 
@@ -33,8 +36,10 @@ describe('OpenCode proxy SSE forwarding', () => {
     Object.defineProperty(process, 'platform', originalPlatform);
     await closeServer(proxyServer);
     await closeServer(upstreamServer);
+    await closeServer(replacementUpstreamServer);
     proxyServer = undefined;
     upstreamServer = undefined;
+    replacementUpstreamServer = undefined;
   });
 
   it('forwards event streams with nginx-safe headers', async () => {
@@ -260,6 +265,159 @@ describe('OpenCode proxy SSE forwarding', () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, source: 'external-host' });
+  });
+
+  it('does not forward browser authorization when OpenCode has no auth', async () => {
+    let seenAuthorization = 'not-requested';
+    const upstream = express();
+    upstream.get('/api/config/providers', (req, res) => {
+      seenAuthorization = req.headers.authorization;
+      res.json({ ok: true });
+    });
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {},
+      os: {},
+      path,
+      OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({
+        openCodePort: upstreamPort,
+        isOpenCodeReady: true,
+        openCodeNotReadySince: 0,
+        isRestartingOpenCode: false,
+      }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `http://127.0.0.1:${upstreamPort}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/config/providers`, {
+      headers: { Authorization: 'Bearer browser-secret' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(seenAuthorization).toBeUndefined();
+  });
+
+  it('lets mixed-case service headers override browser headers', async () => {
+    let seenServiceHeader;
+    const upstream = express();
+    upstream.get('/api/config/providers', (req, res) => {
+      seenServiceHeader = req.headers['x-service-header'];
+      res.json({ ok: true });
+    });
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {},
+      os: {},
+      path,
+      OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({
+        openCodePort: upstreamPort,
+        isOpenCodeReady: true,
+        openCodeNotReadySince: 0,
+        isRestartingOpenCode: false,
+      }),
+      getOpenCodeAuthHeaders: () => ({ 'X-Service-Header': 'trusted-value' }),
+      buildOpenCodeUrl: (requestPath) => `http://127.0.0.1:${upstreamPort}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/config/providers`, {
+      headers: { 'x-service-header': 'browser-value' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(seenServiceHeader).toBe('trusted-value');
+  });
+
+  it('routes JSON and global events through rotated shared-service URL and auth', async () => {
+    const credentials = ['Basic first-secret', 'Basic replacement-secret'];
+    const received = [[], []];
+    const upstreamServers = await Promise.all(credentials.map(async (credential, index) => {
+      const upstream = express();
+      upstream.get('/api/config/providers', (req, res) => {
+        received[index].push({
+          path: req.path,
+          authorization: req.headers.authorization,
+          serviceHeader: req.headers['x-service-header'],
+        });
+        res.json({ source: index });
+      });
+      upstream.get('/api/event', (req, res) => {
+        received[index].push({
+          path: req.path,
+          authorization: req.headers.authorization,
+          serviceHeader: req.headers['x-service-header'],
+        });
+        res.type('text/event-stream').send(`data: {"source":${index}}\n\n`);
+      });
+      return listen(upstream);
+    }));
+    [upstreamServer, replacementUpstreamServer] = upstreamServers;
+    let active = 0;
+    const sharedRuntime = {
+      getBaseUrl: () => `http://127.0.0.1:${upstreamServers[active].address().port}`,
+      getHeaders: () => ({ authorization: credentials[active], 'x-service-header': `service-${active}` }),
+    };
+    const connection = createOpenCodeConnectionAdapter({ kind: 'shared-local', sharedRuntime });
+    const network = createOpenCodeNetworkRuntime({
+      state: {},
+      getOpenCodeBaseUrl: connection.getOpenCodeBaseUrl,
+      getOpenCodeAuthHeaders: connection.getOpenCodeAuthHeaders,
+    });
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {},
+      os: {},
+      path,
+      OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({
+        openCodePort: upstreamServers[active].address().port,
+        isOpenCodeReady: true,
+        openCodeNotReadySince: 0,
+        isRestartingOpenCode: false,
+      }),
+      getOpenCodeAuthHeaders: network.getOpenCodeAuthHeaders,
+      buildOpenCodeUrl: network.buildOpenCodeUrl,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+    const proxyBase = `http://127.0.0.1:${proxyServer.address().port}`;
+
+    const firstJson = await fetch(`${proxyBase}/api/config/providers`);
+    const firstBody = await firstJson.text();
+    expect(JSON.parse(firstBody)).toEqual({ source: 0 });
+    active = 1;
+    const secondJson = await fetch(`${proxyBase}/api/config/providers`);
+    const secondBody = await secondJson.text();
+    const eventResponse = await fetch(`${proxyBase}/api/global/event`);
+    const eventBody = await eventResponse.text();
+
+    expect(JSON.parse(secondBody)).toEqual({ source: 1 });
+    expect(eventBody).toBe('data: {"source":1}\n\n');
+    expect(received).toEqual([
+      [{ path: '/api/config/providers', authorization: credentials[0], serviceHeader: 'service-0' }],
+      [
+        { path: '/api/config/providers', authorization: credentials[1], serviceHeader: 'service-1' },
+        { path: '/api/event', authorization: credentials[1], serviceHeader: 'service-1' },
+      ],
+    ]);
+    expect(firstJson.url).toBe(`${proxyBase}/api/config/providers`);
+    expect(secondJson.url).toBe(`${proxyBase}/api/config/providers`);
+    expect(eventResponse.url).toBe(`${proxyBase}/api/global/event`);
+    for (const browserValue of [firstJson.url, secondJson.url, eventResponse.url, firstBody, secondBody, eventBody]) {
+      expect(browserValue).not.toContain('first-secret');
+      expect(browserValue).not.toContain('replacement-secret');
+    }
   });
 
   it('replays parsed urlencoded bodies to generic API proxy requests', async () => {

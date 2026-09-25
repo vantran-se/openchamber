@@ -16,18 +16,20 @@ const createRuntime = (server, overrides = {}) => {
     openCodeWatcherRuntime: { stop: vi.fn() },
     sessionRuntime: { dispose: vi.fn() },
     scheduledTasksRuntime: { stop: vi.fn() },
+    globalEventHub: { stop: vi.fn() },
     getHealthCheckInterval: () => null,
     clearHealthCheckInterval: vi.fn(),
     getTerminalRuntime: () => null,
     setTerminalRuntime: vi.fn(),
     getMessageStreamRuntime: () => null,
     setMessageStreamRuntime: vi.fn(),
-    shouldSkipOpenCodeStop: () => true,
+    getOpenCodeConnectionKind: () => 'explicit-external',
     getOpenCodePort: () => null,
     getOpenCodeProcess: () => null,
     setOpenCodeProcess: vi.fn(),
     killProcessOnPort: vi.fn(),
     waitForPortRelease: vi.fn(async () => true),
+    disposeSharedOpenCodeService: vi.fn(async () => {}),
     getServer: () => server,
     getUiAuthController: () => null,
     setUiAuthController: vi.fn(),
@@ -151,7 +153,7 @@ describe('graceful shutdown runtime', () => {
         throw new Error('fixture cleanup failure');
       },
       getTerminalRuntime: () => ({ shutdown: terminalShutdown }),
-      shouldSkipOpenCodeStop: () => false,
+      getOpenCodeConnectionKind: () => 'managed-owned',
       getOpenCodeProcess: () => ({ close: processClose }),
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -185,6 +187,70 @@ describe('graceful shutdown runtime', () => {
       await shutdown;
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  it('only managed-owned closes and kills OpenCode before waiting for its port', async () => {
+    const close = vi.fn(async () => {});
+    const killProcessOnPort = vi.fn();
+    const waitForPortRelease = vi.fn(async () => true);
+    const disposeSharedOpenCodeService = vi.fn(async () => {});
+    const runtime = createRuntime(null, {
+      getOpenCodeConnectionKind: () => 'managed-owned',
+      getOpenCodePort: () => 4096,
+      getOpenCodeProcess: () => ({ close }),
+      killProcessOnPort,
+      waitForPortRelease,
+      disposeSharedOpenCodeService,
+    });
+
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(killProcessOnPort).toHaveBeenCalledWith(4096);
+    expect(waitForPortRelease).toHaveBeenCalledWith(4096, 5000);
+    expect(disposeSharedOpenCodeService).not.toHaveBeenCalled();
+  });
+
+  it('shared-local disposes connection state without touching the shared service process', async () => {
+    const close = vi.fn();
+    const killProcessOnPort = vi.fn();
+    const waitForPortRelease = vi.fn();
+    const disposeSharedOpenCodeService = vi.fn(async () => {});
+    const runtime = createRuntime(null, {
+      getOpenCodeConnectionKind: () => 'shared-local',
+      getOpenCodeProcess: () => ({ close }),
+      killProcessOnPort,
+      waitForPortRelease,
+      disposeSharedOpenCodeService,
+    });
+
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(disposeSharedOpenCodeService).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(killProcessOnPort).not.toHaveBeenCalled();
+    expect(waitForPortRelease).not.toHaveBeenCalled();
+  });
+
+  it('explicit-external leaves OpenCode and shared state untouched', async () => {
+    const close = vi.fn();
+    const killProcessOnPort = vi.fn();
+    const waitForPortRelease = vi.fn();
+    const disposeSharedOpenCodeService = vi.fn();
+    const runtime = createRuntime(null, {
+      getOpenCodeConnectionKind: () => 'explicit-external',
+      getOpenCodeProcess: () => ({ close }),
+      killProcessOnPort,
+      waitForPortRelease,
+      disposeSharedOpenCodeService,
+    });
+
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(close).not.toHaveBeenCalled();
+    expect(killProcessOnPort).not.toHaveBeenCalled();
+    expect(waitForPortRelease).not.toHaveBeenCalled();
+    expect(disposeSharedOpenCodeService).not.toHaveBeenCalled();
   });
 
   it('stops guest services during shutdown', async () => {
@@ -253,6 +319,15 @@ describe('graceful shutdown runtime', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(reconcile).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops the application-owned global event hub during embedded shutdown', async () => {
+    const globalEventHub = { stop: vi.fn() };
+    const runtime = createRuntime(null, { globalEventHub });
+
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(globalEventHub.stop).toHaveBeenCalledOnce();
   });
 
   it('isolates failed viewer and relay cleanup and still drains guests and exits', async () => {

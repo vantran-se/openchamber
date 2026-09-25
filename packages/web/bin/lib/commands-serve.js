@@ -311,6 +311,15 @@ async function serveCommand(options) {
             settled = true;
             clearTimeout(timeout);
             resolve(msg.port);
+            return;
+          }
+          if (msg && msg.type === 'openchamber:error') {
+            settled = true;
+            clearTimeout(timeout);
+            const error = new Error(msg.message || 'OpenChamber failed to start');
+            if (msg.code) error.code = msg.code;
+            if (msg.url) error.url = msg.url;
+            reject(error);
           }
         });
 

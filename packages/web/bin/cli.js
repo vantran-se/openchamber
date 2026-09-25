@@ -414,7 +414,9 @@ if (isCliExecution) {
 
   main().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    if (isJsonMode(activeCommandOptions)) {
+    if (error?.cliReported === true) {
+      process.exit(EXIT_CODE.GENERAL_ERROR);
+    } else if (isJsonMode(activeCommandOptions)) {
       printJson({
         status: 'error',
         error: {
