@@ -1,5 +1,6 @@
 import { requestServerShutdown } from './cli-http.js';
-import { discoverRunningInstances } from './cli-lifecycle.js';
+import { discoverRunningInstances as discoverRunningInstancesDefault } from './cli-lifecycle.js';
+import { getStartupStatus as getStartupStatusDefault, restartStartupService as restartStartupServiceDefault } from './cli-startup.js';
 import {
   readInstanceOptions,
   removePidFile,
@@ -16,18 +17,27 @@ import {
   logStatus,
 } from '../cli-output.js';
 
-export function partitionUpdateInstances(instances, readOptions = readInstanceOptions) {
+export function partitionUpdateInstances(instances, readOptions = readInstanceOptions, startupStatus = null) {
   const managed = [];
+  const startup = [];
   const foreground = [];
   for (const instance of instances) {
     const options = readOptions(instance.instanceFilePath) || {};
-    if (options.launchMode === 'foreground') foreground.push(instance);
-    else managed.push(instance);
+    if (options.launchMode !== 'foreground') managed.push(instance);
+    else if (startupStatus?.enabled && startupStatus.port === instance.port && instance.startupService === true) startup.push(instance);
+    else foreground.push(instance);
   }
-  return { managed, foreground };
+  return { managed, startup, foreground };
 }
 
-function createUpdateCommand({ importFromFilePath, packageManagerPath, serveCommand }) {
+function createUpdateCommand({
+  importFromFilePath,
+  packageManagerPath,
+  serveCommand,
+  discoverRunningInstances = discoverRunningInstancesDefault,
+  getStartupStatus = getStartupStatusDefault,
+  restartStartupService = restartStartupServiceDefault,
+}) {
   return async function updateCommand(options = {}) {
     const showOutput = shouldRenderHumanOutput(options);
     const updateSpin = createSpinner(options);
@@ -40,7 +50,12 @@ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveComm
     } = await importFromFilePath(packageManagerPath);
 
     const runningInstances = await discoverRunningInstances();
-    const { managed: managedInstances } = partitionUpdateInstances(runningInstances);
+    const startupStatus = getStartupStatus();
+    const { managed: managedInstances, startup: startupInstances } = partitionUpdateInstances(
+      runningInstances,
+      readInstanceOptions,
+      startupStatus,
+    );
     const currentVersion = getCurrentVersion();
 
     if (showOutput) {
@@ -111,6 +126,11 @@ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveComm
         clackOutro('update failed');
       }
       throw new Error(`Update failed with exit code ${result.exitCode}`);
+    }
+
+    if (startupInstances.length > 0) {
+      updateSpin?.message('Restarting startup service...');
+      restartStartupService();
     }
 
     if (managedInstances.length > 0) {

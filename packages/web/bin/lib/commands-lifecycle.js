@@ -1,6 +1,7 @@
 import { EXIT_CODE, TunnelCliError } from './cli-errors.js';
 import { requestServerShutdown } from './cli-http.js';
 import { isPortAvailable } from './cli-ports.js';
+import { controlStartupService, getStartupStatus } from './cli-startup.js';
 import {
   discoverLifecycleInstances,
   discoverUnconfirmedRegistryInstanceOnPort,
@@ -24,6 +25,7 @@ import {
 } from '../cli-output.js';
 
 async function stopCommand(options) {
+    const startupStatus = getStartupStatus();
     const showOutput = shouldRenderHumanOutput(options);
     const suppressQuietOutput = options?.suppressQuietOutput === true;
     const jsonResults = [];
@@ -75,6 +77,17 @@ async function stopCommand(options) {
       }
 
       const explicitInstance = runningInstances[0];
+      if (startupStatus.enabled && startupStatus.port === explicitInstance.port && explicitInstance.startupService === true) {
+        controlStartupService('stop');
+        jsonResults.push({ port: explicitInstance.port, stopped: true, manager: startupStatus.platform });
+        if (isJsonMode(options)) printJson({ stoppedCount: 1, results: jsonResults });
+        else if (showOutput) {
+          logStatus('success', `stopped startup service on port ${explicitInstance.port}`);
+          finish('stop complete');
+        }
+        printQuietStopResults();
+        return;
+      }
       if (explicitInstance.runtime === 'desktop') {
         jsonResults.push({ port: options.port, runtime: 'desktop', stopped: false, reason: 'desktop-managed' });
         if (isJsonMode(options)) {
@@ -210,6 +223,11 @@ async function stopCommand(options) {
     }
 
     for (const instance of runningInstances) {
+      if (startupStatus.enabled && startupStatus.port === instance.port && instance.startupService === true) {
+        controlStartupService('stop');
+        jsonResults.push({ port: instance.port, stopped: true, manager: startupStatus.platform });
+        continue;
+      }
       const stopSpin = showOutput ? createSpinner(options) : null;
       if (showOutput && !stopSpin) {
         logStatus('info', `stopping port ${instance.port} (PID: ${instance.pid})`);
@@ -287,7 +305,13 @@ async function restartCommand(options, serveCommand) {
       return;
     }
 
+    const startupStatus = getStartupStatus();
     for (const instance of runningInstances) {
+      if (startupStatus.enabled && startupStatus.port === instance.port && instance.startupService === true) {
+        controlStartupService('restart');
+        restarted.push({ fromPort: instance.port, toPort: instance.port, manager: startupStatus.platform });
+        continue;
+      }
       if (instance.runtime === 'desktop') {
         const message = `Port ${instance.port} is managed by OpenChamber Desktop and cannot be restarted with this command.`;
         if (isJsonMode(options)) {
@@ -316,6 +340,11 @@ async function restartCommand(options, serveCommand) {
       const isForeground = launchMode === 'foreground';
 
       const restartPort = options.explicitPort ? options.port : instance.port;
+      if (isForeground) {
+        restarted.push({ fromPort: instance.port, toPort: restartPort, launchMode, ok: false, reason: 'manual-foreground' });
+        if (showOutput) logStatus('warning', `foreground OpenChamber on port ${instance.port} requires its owning terminal or process manager to restart it`);
+        continue;
+      }
 
       const restartSpin = showOutput ? createSpinner(options) : null;
       if (showOutput && !restartSpin) {
@@ -330,19 +359,6 @@ async function restartCommand(options, serveCommand) {
           quiet: true,
           suppressQuietOutput: true,
         });
-
-        // Foreground instances are managed by a process manager (systemd,
-        // Docker, etc.) that will restart them automatically after stop.
-        // Do not call serve() here — just record the stop as a successful
-        // restart and let the process manager handle the actual restart.
-        if (isForeground) {
-          restarted.push({ fromPort: instance.port, toPort: restartPort, launchMode, ok: true });
-          restartSpin?.stop(`Stopped foreground instance on port ${instance.port} (process manager will restart)`);
-          if (showOutput && !restartSpin) {
-            logStatus('success', `port ${instance.port} stopped`, 'process manager will restart');
-          }
-          continue;
-        }
 
         await new Promise((resolve) => setTimeout(resolve, 500));
 

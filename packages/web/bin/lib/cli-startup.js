@@ -91,6 +91,7 @@ function collectStartupEnv(options = {}) {
       env.OPENCODE_BINARY = opencodeBinary.trim();
     }
   }
+  env.OPENCHAMBER_STARTUP_SERVICE = '1';
   const uiPassword = hasUiPasswordConfigured(options.uiPassword) ? options.uiPassword : undefined;
   if (uiPassword) {
     env.OPENCHAMBER_UI_PASSWORD = uiPassword;
@@ -329,6 +330,17 @@ function getUserLingerEnabled(user) {
   return parseLingerState(result.stdout);
 }
 
+function startupServicePort(servicePath) {
+  try {
+    const content = fs.readFileSync(servicePath, 'utf8');
+    const match = content.match(/(?:--port(?:&quot;|"|')?\s+(?:&quot;|"|')?|<string>--port<\/string>\s*<string>)(\d+)/);
+    const port = Number.parseInt(match?.[1] || '', 10);
+    return Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT;
+  } catch {
+    return DEFAULT_PORT;
+  }
+}
+
 function getStartupStatus() {
   const paths = getStartupServicePaths();
   if (!paths.servicePath) {
@@ -336,7 +348,14 @@ function getStartupStatus() {
   }
   if (paths.platform === 'windows') {
     const result = runStartupCommand('schtasks.exe', ['/Query', '/TN', STARTUP_SERVICE_ID], { allowFailure: true });
-    return { supported: true, platform: paths.platform, enabled: result.status === 0, active: null, servicePath: paths.servicePath };
+    return {
+      supported: true,
+      platform: paths.platform,
+      enabled: result.status === 0,
+      active: null,
+      servicePath: paths.servicePath,
+      port: startupServicePort(getWindowsStartupWrapperPath()),
+    };
   }
   if (paths.platform === 'linux') {
     const enabledResult = runStartupCommand('systemctl', ['--user', 'is-enabled', 'openchamber.service'], { allowFailure: true });
@@ -350,6 +369,7 @@ function getStartupStatus() {
       active: activeState === 'active',
       activeState,
       servicePath: paths.servicePath,
+      port: startupServicePort(paths.servicePath),
       lingerEnabled: getUserLingerEnabled(lingerUser),
       lingerUser: lingerUser || null,
     };
@@ -360,6 +380,7 @@ function getStartupStatus() {
     enabled: fs.existsSync(paths.servicePath),
     active: null,
     servicePath: paths.servicePath,
+    port: startupServicePort(paths.servicePath),
   };
 }
 
@@ -430,10 +451,41 @@ function disableStartupService() {
   return getStartupStatus();
 }
 
+function controlStartupService(action) {
+  const status = getStartupStatus();
+  if (!status.supported || !status.enabled) {
+    throw new TunnelCliError('OpenChamber startup service is not installed.', EXIT_CODE.USAGE_ERROR);
+  }
+  if (!['start', 'stop', 'restart'].includes(action)) {
+    throw new TunnelCliError(`Unsupported startup service action: ${action}`, EXIT_CODE.USAGE_ERROR);
+  }
+  if (status.platform === 'linux') {
+    runStartupCommand('systemctl', ['--user', action, 'openchamber.service']);
+  } else if (status.platform === 'macos') {
+    const domain = `gui/${process.getuid()}`;
+    const target = `${domain}/${STARTUP_SERVICE_ID}`;
+    if (action === 'stop') {
+      runStartupCommand('/bin/launchctl', ['bootout', target], { allowFailure: true });
+    } else {
+      runStartupCommand('/bin/launchctl', ['bootout', target], { allowFailure: true });
+      runStartupCommand('/bin/launchctl', ['bootstrap', domain, status.servicePath]);
+      runStartupCommand('/bin/launchctl', ['kickstart', '-k', target]);
+    }
+  } else if (status.platform === 'windows') {
+    if (action !== 'start') runStartupCommand('schtasks.exe', ['/End', '/TN', STARTUP_SERVICE_ID], { allowFailure: true });
+    if (action !== 'stop') runStartupCommand('schtasks.exe', ['/Run', '/TN', STARTUP_SERVICE_ID]);
+  }
+  return getStartupStatus();
+}
+
+const restartStartupService = () => controlStartupService('restart');
 
 export {
   getStartupStatus,
+  startupServicePort,
   enableStartupService,
   disableStartupService,
+  controlStartupService,
+  restartStartupService,
   buildWindowsStartupTaskCommand,
 };

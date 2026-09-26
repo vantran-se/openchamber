@@ -60,6 +60,7 @@ function writeInstanceOptions(instanceFilePath, options, onNotice) {
       uiPassword: typeof options.uiPassword === 'string' ? options.uiPassword : undefined,
       hasUiPassword: typeof options.uiPassword === 'string',
       apiOnly: options.apiOnly === true,
+      startupService: process.env.OPENCHAMBER_STARTUP_SERVICE === '1',
       startedAt: Number.isFinite(options.startedAt) ? options.startedAt : Date.now(),
     };
     fs.writeFileSync(instanceFilePath, JSON.stringify(toStore, null, 2), { mode: 0o600 });

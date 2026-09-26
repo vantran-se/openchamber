@@ -127,6 +127,7 @@ These modules hold reusable, non-presentational logic for commands.
 
 - `cli-startup.js`
   - Native startup service detection, install/uninstall/status helpers, and platform-specific startup command execution.
+  - Installed startup services remain owned by their platform service manager. `startup start|stop|restart` controls that manager directly. Top-level lifecycle commands route the service's configured port through the same manager, and `update` restarts it after package installation instead of starting a duplicate daemon.
 
 - `cli-tunnel-profiles.js`
   - Tunnel profile normalization, token resolution/redaction, profile storage, migration, file-permission warnings, and managed-remote pair persistence.

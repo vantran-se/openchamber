@@ -12,26 +12,60 @@ async function withTempOpenChamberDataDir(fn) {
   try {
     return await fn(dir);
   } finally {
-    if (typeof previous === 'string') {
-      process.env.OPENCHAMBER_DATA_DIR = previous;
-    } else {
-      delete process.env.OPENCHAMBER_DATA_DIR;
-    }
+    if (previous === undefined) delete process.env.OPENCHAMBER_DATA_DIR;
+    else process.env.OPENCHAMBER_DATA_DIR = previous;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
 describe('update command', () => {
-  it('leaves foreground service-manager instances running', () => {
+  it('separates CLI daemons from the installed startup service', () => {
     const daemon = { port: 3000, instanceFilePath: '/daemon.json' };
-    const foreground = { port: 3069, instanceFilePath: '/foreground.json' };
-    const readOptions = vi.fn((filePath) => (
-      filePath === foreground.instanceFilePath ? { launchMode: 'foreground' } : { launchMode: 'daemon' }
-    ));
+    const startup = { port: 3069, instanceFilePath: '/startup.json', startupService: true };
+    const manualForeground = { port: 3070, instanceFilePath: '/manual.json' };
+    const readOptions = vi.fn((filePath) => ({
+      launchMode: filePath === daemon.instanceFilePath ? 'daemon' : 'foreground',
+    }));
 
-    expect(partitionUpdateInstances([daemon, foreground], readOptions)).toEqual({
+    expect(partitionUpdateInstances(
+      [daemon, startup, manualForeground],
+      readOptions,
+      { enabled: true, active: true, port: 3069 },
+    )).toEqual({
       managed: [daemon],
-      foreground: [foreground],
+      startup: [startup],
+      foreground: [manualForeground],
+    });
+  });
+
+  it('restarts the installed startup service after updating', async () => {
+    await withTempOpenChamberDataDir(async (dir) => {
+      const originalWrite = process.stdout.write;
+      process.stdout.write = vi.fn(() => true);
+      const instanceFilePath = path.join(dir, 'run', 'openchamber-3069.json');
+      fs.mkdirSync(path.dirname(instanceFilePath), { recursive: true });
+      fs.writeFileSync(instanceFilePath, JSON.stringify({ port: 3069, launchMode: 'foreground' }));
+      const restartStartupService = vi.fn();
+      const updateCommand = createUpdateCommand({
+        packageManagerPath: '/fake/package-manager.js',
+        serveCommand: vi.fn(),
+        discoverRunningInstances: vi.fn(async () => [{ port: 3069, instanceFilePath, startupService: true }]),
+        getStartupStatus: vi.fn(() => ({ supported: true, enabled: true, active: true, port: 3069 })),
+        restartStartupService,
+        importFromFilePath: vi.fn(async () => ({
+          checkForUpdates: vi.fn(async () => ({ available: true, version: '9.9.9' })),
+          detectPackageManager: vi.fn(() => 'npm'),
+          executeUpdate: vi.fn(() => ({ success: true, exitCode: 0 })),
+          getCurrentVersion: vi.fn(() => '1.0.0'),
+        })),
+      });
+
+      try {
+        await updateCommand({ json: true });
+        expect(restartStartupService).toHaveBeenCalledTimes(1);
+      } finally {
+        process.stdout.write = originalWrite;
+      }
     });
   });
 

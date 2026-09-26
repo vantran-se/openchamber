@@ -674,6 +674,9 @@ SUBCOMMANDS:
   status      Show startup integration status
   enable      Install and start native user startup integration
   disable     Stop and remove native user startup integration
+  start       Start the installed startup service
+  stop        Stop the installed startup service
+  restart     Restart the installed startup service
 
 OPTIONS:
   -p, --port              Web server port used by startup service

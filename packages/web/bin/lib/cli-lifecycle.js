@@ -234,6 +234,7 @@ async function discoverRunningInstances(options = {}) {
         mtime,
         startedAt,
         launchMode,
+        startupService: storedOptions?.startupService === true,
         runtime: liveInfo.runtime,
         source: 'registry+probe',
         host: typeof confirmedHost === 'string' && confirmedHost.length > 0
