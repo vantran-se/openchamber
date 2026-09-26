@@ -74,7 +74,7 @@ jobs:
         working-directory: packages/web
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
-          OPENCHAMBER_SDK_VERSION: "2.0.0"
+          OPENCHAMBER_SDK_VERSION: "2.0.2"
         run: |
           npm pkg set name=@vantran-se/openchamber-web
           npm pkg set version="$RELEASE_VERSION"
