@@ -16,6 +16,17 @@ import {
   logStatus,
 } from '../cli-output.js';
 
+export function partitionUpdateInstances(instances, readOptions = readInstanceOptions) {
+  const managed = [];
+  const foreground = [];
+  for (const instance of instances) {
+    const options = readOptions(instance.instanceFilePath) || {};
+    if (options.launchMode === 'foreground') foreground.push(instance);
+    else managed.push(instance);
+  }
+  return { managed, foreground };
+}
+
 function createUpdateCommand({ importFromFilePath, packageManagerPath, serveCommand }) {
   return async function updateCommand(options = {}) {
     const showOutput = shouldRenderHumanOutput(options);
@@ -29,6 +40,7 @@ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveComm
     } = await importFromFilePath(packageManagerPath);
 
     const runningInstances = await discoverRunningInstances();
+    const { managed: managedInstances } = partitionUpdateInstances(runningInstances);
     const currentVersion = getCurrentVersion();
 
     if (showOutput) {
@@ -75,9 +87,9 @@ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveComm
     }
     updateSpin?.message(`Updating to ${updateInfo.version || 'latest'}...`);
 
-    if (runningInstances.length > 0) {
-      updateSpin?.message(`Stopping ${runningInstances.length} running instance(s)...`);
-      for (const instance of runningInstances) {
+    if (managedInstances.length > 0) {
+      updateSpin?.message(`Stopping ${managedInstances.length} running instance(s)...`);
+      for (const instance of managedInstances) {
         try {
           const requested = await requestServerShutdown(instance.port, instance.host);
           await stopInstanceProcess(instance.pid, {
@@ -101,9 +113,9 @@ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveComm
       throw new Error(`Update failed with exit code ${result.exitCode}`);
     }
 
-    if (runningInstances.length > 0) {
-      updateSpin?.message(`Restarting ${runningInstances.length} instance(s)...`);
-      for (const instance of runningInstances) {
+    if (managedInstances.length > 0) {
+      updateSpin?.message(`Restarting ${managedInstances.length} instance(s)...`);
+      for (const instance of managedInstances) {
         const storedOptions = readInstanceOptions(instance.instanceFilePath) || { port: instance.port };
         await serveCommand({
           port: storedOptions.port || instance.port,
