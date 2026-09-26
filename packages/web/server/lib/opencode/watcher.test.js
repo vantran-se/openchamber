@@ -3,6 +3,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGlobalMessageStreamHub } from '../event-stream/global-hub.js';
 import { createOpenCodeWatcherRuntime } from './watcher.js';
 
+async function waitForAssertion(assertion) {
+  const deadline = Date.now() + 1000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
+
 function createSseResponse({ blocks = [], signal, holdOpen = false }) {
   const encoder = new TextEncoder();
   let index = 0;
@@ -63,7 +78,7 @@ describe('createOpenCodeWatcherRuntime', () => {
         return createSseResponse({
           signal: options.signal,
           blocks: [
-            'id: evt-1\ndata: {"directory":"/tmp/project","payload":{"type":"session.updated","properties":{"sessionID":"ses_1"}}}\n\n',
+            'data: {"directory":"/tmp/project","payload":{"id":"evt-1","type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_1","title":"New"}}}\n\n',
           ],
         });
       },
@@ -74,7 +89,7 @@ describe('createOpenCodeWatcherRuntime', () => {
 
     expect(fetchCalls).toEqual([
       {
-        url: 'http://127.0.0.1:4096/global/event',
+        url: 'http://127.0.0.1:4096/api/event',
         headers: {
           Accept: 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -83,14 +98,13 @@ describe('createOpenCodeWatcherRuntime', () => {
         },
       },
     ]);
-    expect(payloads).toEqual([
-      {
-        type: 'session.updated',
-        properties: {
-          sessionID: 'ses_1',
-        },
-      },
-    ]);
+    // The watcher hands its consumers the server's own vocabulary, translated
+    // from the v2 wire event.
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      type: 'session.updated',
+      properties: { sessionID: 'ses_1', info: { id: 'ses_1', title: 'New' } },
+    });
   });
 
   it('resumes watcher reconnects with Last-Event-ID after a stalled upstream stream', async () => {
@@ -118,7 +132,7 @@ describe('createOpenCodeWatcherRuntime', () => {
             signal: options.signal,
             holdOpen: true,
             blocks: [
-              'id: evt-1\ndata: {"type":"server.connected","properties":{}}\n\n',
+              'data: {"id":"evt-1","type":"server.connected","data":{}}\n\n',
             ],
           });
         }
@@ -126,7 +140,7 @@ describe('createOpenCodeWatcherRuntime', () => {
         return createSseResponse({
           signal: options.signal,
           blocks: [
-            'id: evt-2\ndata: {"type":"session.updated","properties":{}}\n\n',
+            'data: {"id":"evt-2","type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_1","title":"New"}}\n\n',
           ],
         });
       },
@@ -157,7 +171,7 @@ describe('createOpenCodeWatcherRuntime', () => {
           signal: options.signal,
           holdOpen: true,
           blocks: [
-            'id: evt-1\ndata: {"payload":{"type":"session.updated","properties":{"sessionID":"ses_1"}}}\n\n',
+            'data: {"payload":{"id":"evt-1","type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_1","title":"New"}}}\n\n',
           ],
         });
       },
@@ -183,14 +197,50 @@ describe('createOpenCodeWatcherRuntime', () => {
 
     expect(hubFetchCalls).toBe(1);
     expect(watcherFetchCalls).toBe(0);
-    expect(payloads).toEqual([
-      {
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      type: 'session.updated',
+      properties: { sessionID: 'ses_1', info: { id: 'ses_1', title: 'New' } },
+    });
+  });
+
+  it('keeps its shared subscription across a hub rebind', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    let generation = 0;
+    const payloads = [];
+    const globalEventHub = createGlobalMessageStreamHub({
+      buildOpenCodeUrl: () => `http://127.0.0.1:${generation === 0 ? 4096 : 5096}/api/event`,
+      getOpenCodeAuthHeaders: () => ({ Authorization: generation === 0 ? 'Basic first' : 'Basic second' }),
+      upstreamReconnectDelayMs: 60_000,
+      fetchImpl: async (_url, options) => createSseResponse({
+        signal: options.signal,
+        holdOpen: true,
+        blocks: [generation === 0
+          ? 'data: {"id":"evt-1","type":"server.connected","data":{}}\n\n'
+          : 'data: {"id":"evt-2","type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_1","title":"Recovered"}}\n\n'],
+      }),
+    });
+    const watcher = createOpenCodeWatcherRuntime({
+      waitForOpenCodePort: async () => {},
+      buildOpenCodeUrl: () => '',
+      getOpenCodeAuthHeaders: () => ({}),
+      globalEventHub,
+      onPayload: (payload) => payloads.push(payload),
+    });
+
+    try {
+      await watcher.start();
+      await waitForAssertion(() => expect(payloads.map((payload) => payload.type)).toContain('server.connected'));
+      generation = 1;
+      globalEventHub.rebind();
+      await waitForAssertion(() => expect(payloads).toContainEqual(expect.objectContaining({
         type: 'session.updated',
-        properties: {
-          sessionID: 'ses_1',
-        },
-      },
-    ]);
+        properties: expect.objectContaining({ sessionID: 'ses_1' }),
+      })));
+    } finally {
+      watcher.stop();
+      globalEventHub.stop();
+    }
   });
 
   it('does not stop a shared global event hub when the watcher stops', async () => {

@@ -120,6 +120,9 @@
     "agentWebToolEnabled": {
       "scope": "instance"
     },
+    "browserProvider": {
+      "scope": "instance"
+    },
     "agentMemoryToolEnabled": {
       "scope": "instance"
     },
@@ -212,8 +215,9 @@
     "sidebarProjectDisplayMode": {
       "scope": "profile"
     },
-    "sidebarSessionGroupingMode": {
-      "scope": "profile"
+    "sidebarViewMode": {
+      "scope": "profile",
+      "perSurface": true
     },
     "sidebarProjectSortOrder": {
       "scope": "profile"
@@ -340,9 +344,6 @@
         "desktop",
         "vscode"
       ]
-    },
-    "showOpenCodeRestartConfirm": {
-      "scope": "profile"
     },
     "allowPromptingSubagentSessions": {
       "scope": "profile"
@@ -542,9 +543,6 @@
       "scope": "profile"
     },
     "responseStyleCustomInstructions": {
-      "scope": "profile"
-    },
-    "optimizeSystemPrompt": {
       "scope": "profile"
     },
     "pwaAppName": {

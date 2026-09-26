@@ -13,43 +13,90 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     contextObligatoryRuntime,
     messageQueueRuntime,
     scheduledTasksRuntime,
+    globalEventHub,
     getHealthCheckInterval,
     clearHealthCheckInterval,
     getTerminalRuntime,
     setTerminalRuntime,
     getMessageStreamRuntime,
     setMessageStreamRuntime,
-    shouldSkipOpenCodeStop,
+    getOpenCodeConnectionKind,
     getOpenCodePort,
     getOpenCodeProcess,
     setOpenCodeProcess,
     killProcessOnPort,
     waitForPortRelease,
+    disposeSharedOpenCodeService,
     getServer,
     getUiAuthController,
     setUiAuthController,
     getActiveTunnelController,
     setActiveTunnelController,
     tunnelAuthController,
+    beginGuestServiceShutdown,
+    stopAllGuestServices,
+    getGuestSurfaceRuntime,
+    getRealtimeProxyRuntime,
+    getDictationRuntime,
+    getRelayService,
+    getRelayReconcileTimer,
   } = dependencies;
 
   let shutdownPromise = null;
+  const serverConnections = new Set();
+  let closingHttpServer = false;
+
+  // Track TCP sockets before listen(): HTTP stops tracking them on upgrade,
+  // even when no WebSocket handler completes the handshake.
+  const trackServerConnections = (server) => {
+    const onConnection = (socket) => {
+      if (closingHttpServer) {
+        socket.destroy();
+        return;
+      }
+      serverConnections.add(socket);
+      socket.once('close', () => serverConnections.delete(socket));
+    };
+    server.on('connection', onConnection);
+    server.once('close', () => server.off('connection', onConnection));
+  };
 
   const runShutdown = async (options = {}) => {
     if (getIsShuttingDown()) return;
 
     setIsShuttingDown(true);
+    beginGuestServiceShutdown();
     syncToHmrState();
     console.log('Starting graceful shutdown...');
-    const exitProcess = typeof options.exitProcess === 'boolean' ? options.exitProcess : getExitOnShutdown();
+    const exitProcess = options.exitProcess === true || options.exitProcess === false
+      ? options.exitProcess
+      : getExitOnShutdown();
 
-    openCodeWatcherRuntime.stop();
-    sessionRuntime.dispose();
-    sessionAssistRuntime?.stop?.();
-    sessionGoalRuntime?.stop?.();
-    contextObligatoryRuntime?.stop?.();
-    messageQueueRuntime?.stop?.();
-    scheduledTasksRuntime?.stop?.();
+    // Both embedded stop() and daemon exits use this sequence. Close admission
+    // synchronously above, then stop viewers before draining their services.
+    const cleanupOperations = [
+      () => clearInterval(getRelayReconcileTimer()),
+      () => getGuestSurfaceRuntime()?.stop(),
+      () => getRealtimeProxyRuntime()?.stop(),
+      () => getRelayService()?.stop(),
+      () => getDictationRuntime()?.stop(),
+      () => openCodeWatcherRuntime.stop(),
+      () => globalEventHub.stop(),
+      () => sessionRuntime.dispose(),
+      () => sessionAssistRuntime?.stop?.(),
+      () => sessionGoalRuntime?.stop?.(),
+      () => contextObligatoryRuntime?.stop?.(),
+      () => messageQueueRuntime?.stop?.(),
+      () => scheduledTasksRuntime?.stop?.(),
+      stopAllGuestServices,
+    ];
+    for (const cleanup of cleanupOperations) {
+      try {
+        await cleanup();
+      } catch {
+        // One failed runtime must not skip the rest of host teardown.
+      }
+    }
 
     const healthCheckInterval = getHealthCheckInterval();
     if (healthCheckInterval) {
@@ -76,7 +123,8 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       }
     }
 
-    if (!shouldSkipOpenCodeStop()) {
+    const connectionKind = getOpenCodeConnectionKind();
+    if (connectionKind === 'managed-owned') {
       const portToKill = getOpenCodePort();
       const openCodeProcess = getOpenCodeProcess();
 
@@ -94,12 +142,13 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       if (!(await waitForPortRelease(portToKill, 5000))) {
         console.warn(`Timed out waiting for OpenCode port ${portToKill} to be released during shutdown`);
       }
-    } else {
-      console.log('Skipping OpenCode shutdown (external server)');
+    } else if (connectionKind === 'shared-local') {
+      await disposeSharedOpenCodeService();
     }
 
     const server = getServer();
     if (server) {
+      closingHttpServer = true;
       let closeTimeout = null;
       try {
         await Promise.race([
@@ -111,6 +160,9 @@ export const createGracefulShutdownRuntime = (dependencies) => {
             // The backend has stopped. Active SSE/HTTP clients must not keep
             // Desktop waiting for the outer shutdown deadline.
             server.closeAllConnections?.();
+            // Includes upgraded sockets and reconnects accepted while the
+            // services above were draining. No child-process grace is cut short.
+            for (const socket of serverConnections) socket.destroy();
           }),
           new Promise((resolve) => {
             closeTimeout = setTimeout(() => {
@@ -154,5 +206,6 @@ export const createGracefulShutdownRuntime = (dependencies) => {
 
   return {
     gracefulShutdown,
+    trackServerConnections,
   };
 };

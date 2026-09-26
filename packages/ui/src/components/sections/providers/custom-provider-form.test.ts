@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  buildAuthSetRequest,
+  buildIntegrationKeyRequest,
   buildProviderUpsertRequest,
   isConfigDefinedCustomProvider,
   isCustomOpenAICompatibleProvider,
@@ -19,7 +19,7 @@ const baseForm = (overrides: Partial<CustomProviderFormState> = {}): CustomProvi
   protocol: 'openai-chat',
   baseURL: 'https://api.example.com/v1',
   apiKey: 'sk-test',
-  models: [{ row: 'm0', id: 'model-a', name: 'Model A' }],
+  models: [{ row: 'm0', id: 'model-a', name: 'Model A', variants: '' }],
   headers: [{ row: 'h0', key: '', value: '' }],
   ...overrides,
 });
@@ -54,7 +54,7 @@ describe('validateCustomProvider', () => {
         name: ' Custom Provider ',
         baseURL: ' https://api.example.com/v1 ',
         apiKey: ' sk-secret ',
-        models: [{ row: 'm0', id: ' model-a ', name: ' Model A ' }],
+        models: [{ row: 'm0', id: ' model-a ', name: ' Model A ', variants: '' }],
         headers: [
           { row: 'h0', key: ' X-Test ', value: ' enabled ' },
           { row: 'h1', key: '', value: '' },
@@ -69,16 +69,16 @@ describe('validateCustomProvider', () => {
       name: 'Custom Provider',
       apiKey: 'sk-secret',
       config: {
-        npm: '@ai-sdk/openai-compatible',
+        package: 'aisdk:@ai-sdk/openai-compatible',
         name: 'Custom Provider',
-        options: {
+        settings: {
           baseURL: 'https://api.example.com/v1',
-          headers: {
-            'X-Test': 'enabled',
-          },
+        },
+        headers: {
+          'X-Test': 'enabled',
         },
         models: {
-          'model-a': { name: 'Model A' },
+          'model-a': { modelID: 'model-a', name: 'Model A' },
         },
       },
     });
@@ -104,7 +104,7 @@ describe('validateCustomProvider', () => {
       existingProviderIDs: new Set(),
     });
 
-    expect(result.result?.config.npm).toBe('@ai-sdk/openai');
+    expect(result.result?.config.package).toBe('aisdk:@ai-sdk/openai');
   });
 
   test('rejects missing credentials', () => {
@@ -138,8 +138,8 @@ describe('validateCustomProvider', () => {
         providerID: 'Bad ID',
         baseURL: 'ftp://example.com',
         models: [
-          { row: 'm0', id: 'model-a', name: 'Model A' },
-          { row: 'm1', id: 'model-a', name: 'Model A 2' },
+          { row: 'm0', id: 'model-a', name: 'Model A', variants: '' },
+          { row: 'm1', id: 'model-a', name: 'Model A 2', variants: '' },
         ],
         headers: [
           { row: 'h0', key: 'Authorization', value: 'one' },
@@ -200,7 +200,7 @@ describe('validateCustomProvider', () => {
 });
 
 describe('request construction', () => {
-  test('builds auth.set and provider upsert requests', () => {
+  test('builds integration key and provider upsert requests', () => {
     const validated = validateCustomProvider({
       form: baseForm(),
       t,
@@ -208,9 +208,9 @@ describe('request construction', () => {
     });
     const plan = validated.result!;
 
-    expect(buildAuthSetRequest(plan)).toEqual({
-      providerID: 'custom-provider',
-      auth: { type: 'api', key: 'sk-test' },
+    expect(buildIntegrationKeyRequest(plan)).toEqual({
+      integrationID: 'custom-provider',
+      key: 'sk-test',
     });
     expect(buildProviderUpsertRequest(plan)).toEqual({
       providerID: 'custom-provider',
@@ -231,14 +231,14 @@ describe('request construction', () => {
     expect(buildProviderUpsertRequest(plan, { scope: 'custom' }).scope).toBe('custom');
   });
 
-  test('omits auth.set when using env credentials', () => {
+  test('omits the integration key request when using env credentials', () => {
     const validated = validateCustomProvider({
       form: baseForm({ apiKey: '{env:MY_KEY}' }),
       t,
       existingProviderIDs: new Set(),
     });
 
-    expect(buildAuthSetRequest(validated.result!)).toBeNull();
+    expect(buildIntegrationKeyRequest(validated.result!)).toBeNull();
   });
 });
 
@@ -312,11 +312,11 @@ describe('provider edit helpers', () => {
     expect(state.baseURL).toBe('https://llm.example.edu/v1');
     expect(state.apiKey).toBe('{env:CAMPUS_KEY}');
     expect(state.protocol).toBe('openai-chat');
-    expect(state.models[0]).toEqual({ row: state.models[0].row, id: 'fast', name: 'Fast' });
+    expect(state.models[0]).toEqual({ row: state.models[0].row, id: 'fast', name: 'Fast', variants: '', savedVariants: {} });
     expect(state.headers[0]).toEqual({ row: state.headers[0].row, key: 'X-Campus', value: '1' });
   });
 
-  test('prefills the protocol from a custom provider model', () => {
+  test('prefills the protocol from a v1 model api.npm', () => {
     const state = providerToCustomFormState({
       id: 'responses-api',
       options: { baseURL: 'https://api.example.com/v1' },
@@ -324,6 +324,31 @@ describe('provider edit helpers', () => {
     });
 
     expect(state.protocol).toBe('openai-responses');
+  });
+
+  test('reads a v2 provider: package, settings, headers, modelID', () => {
+    const state = providerToCustomFormState({
+      id: 'campus-llm',
+      name: 'Campus LLM',
+      env: ['CAMPUS_KEY'],
+      package: 'aisdk:@ai-sdk/anthropic',
+      settings: { baseURL: 'https://llm.example.edu/v1' },
+      headers: { 'X-Campus': '1' },
+      models: { fast: { modelID: 'fast-model', name: 'Fast' } },
+    });
+
+    expect(state.protocol).toBe('anthropic-messages');
+    expect(state.baseURL).toBe('https://llm.example.edu/v1');
+    expect(state.headers[0]).toEqual({ row: state.headers[0].row, key: 'X-Campus', value: '1' });
+    expect(state.models[0]).toEqual({ row: state.models[0].row, id: 'fast-model', name: 'Fast', variants: '', savedVariants: {} });
+  });
+
+  test('a v2 provider with only a known package still reads as custom', () => {
+    expect(isCustomOpenAICompatibleProvider({
+      id: 'campus-llm',
+      package: 'aisdk:@ai-sdk/openai-compatible',
+      models: [],
+    })).toBe(true);
   });
 
   test('requires a config-layer source before treating a provider as editable custom', () => {
@@ -368,5 +393,73 @@ describe('provider edit helpers', () => {
       project: { exists: false },
       custom: { exists: true },
     })).toBe('custom');
+  });
+});
+
+describe('custom provider reasoning levels', () => {
+  test('turns typed levels into variants spelled for the protocol', () => {
+    const chat = validateCustomProvider({
+      form: baseForm({ models: [{ row: 'm0', id: 'model-a', name: 'Model A', variants: 'low, medium high,low' }] }),
+      t,
+      existingProviderIDs: new Set(),
+    });
+    expect(chat.result?.config.models['model-a'].variants).toEqual([
+      { id: 'low', settings: { reasoningEffort: 'low' } },
+      { id: 'medium', settings: { reasoningEffort: 'medium' } },
+      { id: 'high', settings: { reasoningEffort: 'high' } },
+    ]);
+
+    const anthropic = validateCustomProvider({
+      form: baseForm({
+        protocol: 'anthropic-messages',
+        models: [{ row: 'm0', id: 'model-a', name: 'Model A', variants: 'max' }],
+      }),
+      t,
+      existingProviderIDs: new Set(),
+    });
+    expect(anthropic.result?.config.models['model-a'].variants).toEqual([
+      { id: 'max', settings: { thinking: { type: 'adaptive', display: 'summarized' }, effort: 'max' } },
+    ]);
+  });
+
+  test('leaves variants out for a new model without levels', () => {
+    const output = validateCustomProvider({ form: baseForm(), t, existingProviderIDs: new Set() });
+    expect(output.result?.config.models['model-a']).toEqual({ modelID: 'model-a', name: 'Model A' });
+  });
+
+  test('edit keeps saved overlays and sends an empty list when levels are cleared', () => {
+    const form = providerToCustomFormState({
+      id: 'custom-provider',
+      name: 'Custom Provider',
+      package: 'aisdk:@ai-sdk/openai-compatible',
+      settings: { baseURL: 'https://api.example.com/v1' },
+      models: [{
+        id: 'model-a',
+        name: 'Model A',
+        variants: [{ id: 'high', settings: { reasoningEffort: 'high' }, body: { think: true } }],
+      }],
+    });
+    expect(form.models[0].variants).toBe('high');
+
+    const kept = validateCustomProvider({
+      form: { ...form, models: [{ ...form.models[0], variants: 'high, low' }] },
+      t,
+      existingProviderIDs: new Set(['custom-provider']),
+      editingProviderID: 'custom-provider',
+      allowExistingAuth: true,
+    });
+    expect(kept.result?.config.models['model-a'].variants).toEqual([
+      { id: 'high', settings: { reasoningEffort: 'high' }, body: { think: true } },
+      { id: 'low', settings: { reasoningEffort: 'low' } },
+    ]);
+
+    const cleared = validateCustomProvider({
+      form: { ...form, models: [{ ...form.models[0], variants: '' }] },
+      t,
+      existingProviderIDs: new Set(['custom-provider']),
+      editingProviderID: 'custom-provider',
+      allowExistingAuth: true,
+    });
+    expect(cleared.result?.config.models['model-a'].variants).toEqual([]);
   });
 });

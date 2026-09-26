@@ -11,12 +11,10 @@ const __dirname = path.dirname(__filename);
 
 const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const PACKAGE_REGISTRY_URL = 'https://registry.npmjs.org';
-const UPSTREAM_NPM_REGISTRY_URL = 'https://registry.npmjs.org/@openchamber%2Fweb';
+const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2F')}`;
+const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
+const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
 const FORK_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
-const FORK_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases/latest';
-const UPSTREAM_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
-const UPSTREAM_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
 let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
@@ -99,7 +97,7 @@ async function resolveAndroidApkUrl(version, candidateUrl) {
   }
 
   try {
-    const response = await fetch(`${UPSTREAM_RELEASES_API_URL}/tags/v${version}`, {
+    const response = await fetch(`${GITHUB_RELEASES_API_URL}/tags/v${version}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'openchamber-update-check',
@@ -161,7 +159,7 @@ async function checkForUpdatesFromApi(currentVersion, options = {}) {
     const versionComparison = compareVersions(data.latestVersion, currentVersion);
     if (versionComparison < 0) return null;
 
-    const releaseUrl = `${UPSTREAM_RELEASES_URL}/tag/v${data.latestVersion}`;
+    const releaseUrl = `${GITHUB_RELEASES_URL}/tag/v${data.latestVersion}`;
     const downloadUrl = typeof data.downloadUrl === 'string'
       ? data.downloadUrl
       : typeof data.download?.url === 'string'
@@ -661,13 +659,27 @@ export function getUpdateCommand(pm = detectPackageManager()) {
   const pmCommand = quoteCommand(resolvePackageManagerCommand(pm));
   switch (pm) {
     case 'pnpm':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
+      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
     case 'yarn':
-      return `${pmCommand} global add ${PACKAGE_NAME}@latest --registry ${PACKAGE_REGISTRY_URL}`;
+      return `${pmCommand} global add ${PACKAGE_NAME}@latest`;
     case 'bun':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
+      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
     default:
-      return `${pmCommand} install -g ${PACKAGE_NAME}@latest --registry=${PACKAGE_REGISTRY_URL}`;
+      return `${pmCommand} install -g ${PACKAGE_NAME}@latest`;
+  }
+}
+
+function getUpdateInvocation(pm = detectPackageManager()) {
+  const command = resolvePackageManagerCommand(pm);
+  switch (pm) {
+    case 'pnpm':
+      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+    case 'yarn':
+      return { command, args: ['global', 'add', `${PACKAGE_NAME}@latest`] };
+    case 'bun':
+      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+    default:
+      return { command, args: ['install', '-g', `${PACKAGE_NAME}@latest`] };
   }
 }
 
@@ -687,9 +699,9 @@ export function getCurrentVersion() {
 /**
  * Fetch latest version from npm registry
  */
-async function getLatestUpstreamVersion() {
+async function getLatestVersion() {
   try {
-    const response = await fetch(UPSTREAM_NPM_REGISTRY_URL, {
+    const response = await fetch(NPM_REGISTRY_URL, {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(10000),
     });
@@ -700,34 +712,7 @@ async function getLatestUpstreamVersion() {
 
     const data = await response.json();
     return data['dist-tags']?.latest || null;
-  } catch {
-    return null;
-  }
-}
-
-async function getLatestForkRelease() {
-  try {
-    const response = await fetch(FORK_LATEST_RELEASE_API_URL, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'openchamber-update-check',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!response.ok) return null;
-
-    const release = await response.json();
-    const tagName = String(release?.tag_name || '');
-    const versionMatch = tagName.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
-    if (!versionMatch) return null;
-
-    const releaseBody = String(release?.body || '').trim();
-    return {
-      version: versionMatch[1],
-      body: releaseBody || undefined,
-      releaseUrl: `${FORK_RELEASES_URL}/tag/v${versionMatch[1]}`,
-    };
-  } catch {
+  } catch (error) {
     return null;
   }
 }
@@ -778,39 +763,40 @@ export async function checkForUpdates(options = {}) {
   const appType = normalizeAppType(options.appType);
   const platform = normalizePlatform(options.platform);
 
-  if (appType !== 'web' && currentVersion !== 'unknown') {
+  if (currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
+      if (appType !== 'web') {
+        return {
+          ...remote,
+          packageManager: pm,
+          updateCommand: 'openchamber update',
+        };
+      }
+
+      const latestVersion = await getLatestVersion();
+      if (!latestVersion) {
+        return {
+          available: false,
+          currentVersion,
+          error: 'Unable to determine versions',
+        };
+      }
+
+      const available = compareVersions(latestVersion, currentVersion) > 0;
       return {
-        ...remote,
+        available,
+        version: latestVersion,
+        currentVersion,
+        body: available && remote.version === latestVersion ? remote.body : undefined,
+        releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
         packageManager: pm,
         updateCommand: 'openchamber update',
       };
     }
   }
 
-  if (appType === 'web') {
-    const release = await getLatestForkRelease();
-    if (!release || currentVersion === 'unknown') {
-      return {
-        available: false,
-        currentVersion,
-        error: 'Unable to determine versions',
-      };
-    }
-
-    return {
-      available: compareVersions(release.version, currentVersion) > 0,
-      version: release.version,
-      currentVersion,
-      body: release.body,
-      releaseUrl: release.releaseUrl,
-      packageManager: pm,
-      updateCommand: 'openchamber update',
-    };
-  }
-
-  const latestVersion = await getLatestUpstreamVersion();
+  const latestVersion = await getLatestVersion();
 
   if (!latestVersion || currentVersion === 'unknown') {
     return {
@@ -835,9 +821,10 @@ export async function checkForUpdates(options = {}) {
     version: latestVersion,
     currentVersion,
     body: changelog,
-    releaseUrl: `${UPSTREAM_RELEASES_URL}/tag/v${latestVersion}`,
+    releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
     downloadUrl,
     packageManager: pm,
+    // Show our CLI command, not raw package manager command
     updateCommand: 'openchamber update',
   };
 }
@@ -847,14 +834,14 @@ export async function checkForUpdates(options = {}) {
  */
 export function executeUpdate(pm = detectPackageManager(), options = {}) {
   const command = getUpdateCommand(pm);
+  const invocation = getUpdateInvocation(pm);
   if (!options?.silent) {
     console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
     console.log(`Running: ${command}`);
   }
 
-  const result = spawnSync(command, {
+  const result = spawnSync(invocation.command, invocation.args, {
     stdio: 'inherit',
-    shell: true,
     ...getSpawnSyncBaseOptions(),
   });
 

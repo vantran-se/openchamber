@@ -1,99 +1,55 @@
-# Managed OpenChamber Agent Tool
+# Managed OpenChamber agent tools
 
 ## Purpose
 
-This module exposes OpenChamber to agents as typed OpenCode custom tools. There
-are two, because controlling sessions and driving a page are separate intents
-the user can want independently:
+This module exposes OpenChamber actions as typed OpenCode custom tools for Electron Desktop's managed OpenCode child.
 
-- `openchamber` — projects, sessions, worktrees, and scheduled tasks. Enabled
-  while the persisted `agentControlToolEnabled` setting is not `false`.
-- `openchamber_web` — looking at and interacting with the page in OpenChamber's
-  browser panel. Enabled while `agentWebToolEnabled` is not `false`.
+The main tools are:
 
-Both default to on, are toggled in Settings → General → OpenCode CLI, and apply
-on the next managed OpenCode restart. Each tool carries only its own actions and
-only the parameters those actions use, so turning one off removes its inputs
-from the schema rather than leaving them visible. The plugin is injected only
-when OpenChamber launches and owns the OpenCode process, and not at all when
-both settings are `false`.
+- `openchamber` for projects, sessions, worktrees, scheduled tasks, and `file.open`
+- `openchamber_web` for inspecting and interacting with the page in OpenChamber's browser panel
 
-- The plugin accepts the action's inputs either inside `parameters` or beside
-  `action`, because models produce both shapes; an explicit `parameters` object
-  wins on a conflict. Rejecting the flattened shape turned a call that plainly
-  carried a `url` into "url is required", which reads as a broken tool rather
-  than a malformed call.
+Their persisted settings control whether each tool is present. Tool definitions include only the actions and inputs enabled for that tool.
 
-## Runtime flow
+## Runtime boundary
 
-1. The OpenChamber HTTP listener binds and publishes its authoritative port.
-2. `prepareManagedOpenCodeEnv()` materializes the plugin under
-   `<openchamber-data-dir>/agent-tool/` and appends its `file://` URL to
-   `OPENCODE_CONFIG_CONTENT` without replacing existing plugin entries.
-3. A random per-child token and callback URL are added only to the managed
-   OpenCode child environment. The URL points at loopback, except when the
-   listener is bound to one concrete address (`--host <ip>`): that socket does
-   not answer on loopback, so the URL uses the bound address instead.
-4. The plugin calls `POST /api/openchamber/agent-tool` with its typed input and
-   OpenCode's authoritative session directory.
-5. The route delegates the fixed action allowlist directly to the shared
-   OpenChamber control service. The CLI uses the same service through its
-   authenticated HTTP adapter, so Goal Mode ordering, wait behavior,
-   partial-failure reporting, and scheduled-task contracts have one owner.
-6. Each action definition owns a short presentation title and a separate
-   agent-facing description. The generated schema uses the description to state
-   required inputs or one non-obvious behavior, while completed calls use the
-   short title in native tool metadata.
+Electron Desktop owns the managed integration:
 
-## Agent context budget
+1. `materializePlugin()` writes the generated plugin under `<openchamber-data-dir>/agent-tool/`.
+2. The managed OpenCode config lists that plugin directory.
+3. `createChildEnv()` gives the owned OpenCode child a random callback token and loopback callback URL.
+4. The plugin calls `POST /api/openchamber/agent-tool` with its typed input and OpenCode session ID.
+5. OpenChamber resolves the session directory and delegates the fixed action allowlist to the shared control service.
 
-- The tool exposes one shared parameter object rather than repeating parameters
-  in a large per-action union. Action descriptions carry only required inputs,
-  defaults, or one non-obvious semantic detail.
-- The action schema carries `oneOf` and no `enum`. A node combining `enum` and
-  `oneOf` is valid JSON Schema, but some OpenAI-compatible gateways reject it
-  and answer with an empty completion instead of an error.
-- Obvious fields rely on their names and JSON types. Parameter descriptions are
-  reserved for formats, dependencies, scope, and behavior that cannot be safely
-  inferred from the field name.
-- Session dispatches do not wait by default. Agents are told to set `wait` only
-  when the user asks or the next step requires the completed result.
-- The tool exposes only agent-relevant actions
-  (`OPENCHAMBER_AGENT_TOOL_ACTIONS`): `schedule.status` stays CLI-only because
-  `schedule.list` already returns scheduler status, and enable/disable are one
-  `schedule.toggle` action driven by the `disabled` boolean.
-- The tool description frames intent: created sessions and scheduled tasks are
-  user-facing work the user follows up with, never a channel for the agent to
-  delegate parts of its own current task.
-- Optional behavior switches (`worktree`, `goal`, `agent`, `variant`, `wait`)
-  state their default and an explicit "only when the user asks" rule so agents
-  do not invent worktrees, goal mode, or waits the user never requested.
-- Detailed combination rules are enforced by the shared control service and
-  returned as actionable usage errors only after an invalid call. Per-action
-  examples and a repeated per-action parameter schema are intentionally omitted.
+The callback token stays in the managed child environment. It is never persisted, logged, returned to the UI, or written into the generated plugin.
+
+Ordinary Web does not install a plugin, publish callback registration, or advertise managed OpenChamber tools to the shared local OpenCode service. This keeps shared Web limited to sessions and live events. A valid `OPENCODE_HOST` is also outside managed-tool ownership, so OpenChamber does not guarantee tools on that endpoint.
+
+VS Code keeps its separate lifecycle. Hosted and Capacitor clients do not run tools themselves. They may connect to a Desktop-owned backend that has managed tools, but an ordinary Web backend does not add them.
+
+## Input contract
+
+The plugin accepts action inputs inside `parameters` or beside `action`. An explicit `parameters` object wins when both forms provide the same field.
+
+Each action definition has a short presentation title and a separate agent-facing description. The generated schema uses descriptions only for required inputs, defaults, or behavior that a field name cannot explain.
+
+The schema uses one shared parameter object with `oneOf` and no `enum`. Some OpenAI-compatible gateways reject a node that combines both and return an empty completion.
+
+Session dispatch does not wait by default. Optional switches such as `worktree`, `goal`, `agent`, `variant`, and `wait` state their defaults and tell the agent not to invent them.
 
 ## Security invariants
 
-- The callback accepts same-machine requests only and requires the current
-  per-child bearer token using a timing-safe comparison. Same-machine means a
-  loopback source, or, for a listener bound to one concrete address, a source
-  equal to that address: the OS sources a local connection to `<ip>` from
-  `<ip>`. A wildcard bind keeps the loopback-only rule, and another machine on
-  the network always arrives with its own address.
-- The token is never persisted, logged, returned to the UI, or written into
-  the materialized plugin.
-- The plugin adds the callback host to `NO_PROXY`/`no_proxy` inside the managed
-  child when it loads. Without that, an `HTTP_PROXY` in the child's environment
-  would receive a non-loopback callback, token included, because `fetch` has no
-  per-request way to skip the environment proxy.
-- Inputs map to a fixed action and parameter allowlist. There is no arbitrary
-  CLI, shell, route, or URL forwarding.
-- Session/worktree deletion and project-path registration are not exposed.
-- An aborted tool request propagates an abort signal into the shared service.
+- The callback accepts same-machine requests only and requires the current managed-child bearer token with a timing-safe comparison.
+- A concrete listener address may accept a source equal to that address. A wildcard listener remains loopback-only.
+- The plugin adds its callback host to `NO_PROXY` and `no_proxy` in the managed child so an environment proxy cannot receive the callback token.
+- Inputs map to fixed tool, action, and parameter allowlists. There is no arbitrary CLI, shell, route, or URL forwarding.
+- Project-path registration and session or worktree deletion are not exposed.
+- A dropped callback request aborts its action.
+- OpenCode 2 does not give plugin tools an abort signal. The server therefore tracks actions by session and aborts them when the event stream reports an aborted `session.idle` transition.
 
 ## Result contract
 
-Every completed call returns JSON:
+Completed calls return JSON:
 
 ```json
 {
@@ -104,29 +60,10 @@ Every completed call returns JSON:
 }
 ```
 
-Command and operational failures use the same envelope with `ok: false` and
-an `error` object. OpenCode-level cancellation can still produce a native tool
-error state.
+Command and operational failures use the same envelope with `ok: false` and an `error` object. OpenCode-level cancellation can still produce a native tool error.
 
-## Runtime parity
+## Action resolution
 
-- Web and Desktop managed OpenCode: injected automatically.
-- External OpenCode selected with `OPENCODE_HOST` or skip-start: not injected,
-  because OpenChamber does not control that process environment.
-- VS Code: not injected; the extension owns a separate OpenCode lifecycle.
-- Hosted and Capacitor mobile clients use the server's managed OpenCode tool
-  when connected to such a server; no tool runs in the client runtime.
+Each generated tool sends its own name with every callback. Action resolution stays within that tool's allowlist. For example, a bare `open` requested by a memory tool cannot drive the browser.
 
-## The calling tool is part of the request
-
-Each generated tool sends its own name with every callback. Models routinely
-drop the namespace their tool's name appears to supply — `openchamber_memory`
-asked for `memory.read` gets called as `read` — and resolving the bare name
-inside the calling tool's action set makes that unambiguous even where it is not
-globally (`delete` belongs to both schedule and memory).
-
-Resolution never reaches outside the tool that asked: `open` from the memory
-tool fails rather than driving the browser. An unresolvable action answers with
-the actions that tool actually has, because an error that only says
-"unsupported" leaves the model to guess a second wrong name — which is exactly
-what happened before this existed.
+When an action name is invalid, the response lists the actions available to the calling tool. This lets the model correct the call without guessing across tool namespaces.

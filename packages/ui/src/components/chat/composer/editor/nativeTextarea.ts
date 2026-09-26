@@ -48,3 +48,10 @@ export function shouldUseNativeComposerTextarea(nav: Pick<Navigator, 'maxTouchPo
     if (!nav || !/Apple Computer/.test(nav.vendor)) return false;
     return /Mobile\/\w+/.test(nav.userAgent) || nav.maxTouchPoints > 2;
 }
+
+export function shouldRenderNativeComposerTextarea(
+    _isMobile: boolean,
+    nav: Pick<Navigator, 'maxTouchPoints' | 'userAgent' | 'vendor'> | undefined = globalThis.navigator,
+): boolean {
+    return shouldUseNativeComposerTextarea(nav);
+}

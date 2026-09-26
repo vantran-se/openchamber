@@ -68,9 +68,7 @@ beforeEach(() => {
   packageManager.detectPackageManagerDetails.mockReturnValue({
     packageManager: 'npm',
   });
-  packageManager.getUpdateCommand.mockReturnValue(
-    'npm install -g @vantran-se/openchamber-web@latest --registry=https://registry.npmjs.org',
-  );
+  packageManager.getUpdateCommand.mockReturnValue('npm install -g @openchamber/web@latest');
 });
 
 afterEach(() => {
@@ -266,7 +264,7 @@ describe('OpenChamber foreground update route', () => {
       '--setenv=PATH=/home/syu/.npm-global/bin:/usr/bin:/bin',
       '/bin/sh',
       '-c',
-      "set -eu\nnpm install -g @vantran-se/openchamber-web@latest --registry=https://registry.npmjs.org\nsystemctl --user restart 'openchamber@wsl.service'",
+      "set -eu\nnpm install -g @openchamber/web@latest\nsystemctl --user restart 'openchamber@wsl.service'",
     ], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -335,4 +333,3 @@ describe('OpenChamber web update route on Windows', () => {
     expect(logError).toHaveBeenCalledOnce();
   });
 });
-

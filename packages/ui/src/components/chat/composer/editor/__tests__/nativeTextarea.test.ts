@@ -3,8 +3,15 @@ import { describe, expect, test } from 'bun:test';
 import {
     composerTextEdit,
     replaceComposerText,
+    shouldRenderNativeComposerTextarea,
     shouldUseNativeComposerTextarea,
 } from '../nativeTextarea';
+
+const IPAD_NAVIGATOR = {
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)',
+    vendor: 'Apple Computer, Inc.',
+    maxTouchPoints: 5,
+};
 
 describe('composerTextEdit', () => {
     test('reports inserted text for typing and replacement', () => {
@@ -49,11 +56,11 @@ describe('shouldUseNativeComposerTextarea', () => {
             vendor: 'Apple Computer, Inc.',
             maxTouchPoints: 5,
         })).toBe(true);
-        expect(shouldUseNativeComposerTextarea({
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)',
-            vendor: 'Apple Computer, Inc.',
-            maxTouchPoints: 5,
-        })).toBe(true);
+        expect(shouldUseNativeComposerTextarea(IPAD_NAVIGATOR)).toBe(true);
+    });
+
+    test('selects the native editor for wide iPadOS even when the layout is not mobile', () => {
+        expect(shouldRenderNativeComposerTextarea(false, IPAD_NAVIGATOR)).toBe(true);
     });
 
     test('keeps CodeMirror on desktop and Android', () => {

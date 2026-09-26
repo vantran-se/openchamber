@@ -34,7 +34,6 @@ export const createStartupPipelineRuntime = (dependencies) => {
       terminalRebindWindowMs,
       terminalMaxRebindsPerWindow,
       setupProxy,
-      scheduleOpenCodeApiDetection,
       bootstrapOpenCodeAtStartup,
       staticRoutesRuntime,
       process,
@@ -132,13 +131,15 @@ export const createStartupPipelineRuntime = (dependencies) => {
       bindHost,
       startupTunnelRequest,
       onTunnelReady,
+      afterListening: async ({ activePort }) => {
+        tunnelRuntimeContext.setActivePort(activePort);
+        await bootstrapOpenCodeAtStartup();
+      },
     });
     recordStartupPerformance('web.listener.ready', {
       durationMs: performance.now() - pipelineStartedAt,
     });
-    tunnelRuntimeContext.setActivePort(startupResult.activePort);
-    scheduleOpenCodeApiDetection();
-    void bootstrapOpenCodeAtStartup();
+
 
     serverStartupRuntime.attachProcessHandlers({ attachSignals });
 

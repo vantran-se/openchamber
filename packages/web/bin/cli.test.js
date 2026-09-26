@@ -70,10 +70,10 @@ function createMockJsonResponse(body, ok = true) {
   };
 }
 
-async function captureStdout(fn) {
-  const originalWrite = process.stdout.write;
+async function captureStream(stream, fn) {
+  const originalWrite = stream.write;
   let output = '';
-  process.stdout.write = (chunk, encoding, callback) => {
+  stream.write = (chunk, encoding, callback) => {
     output += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
     if (typeof encoding === 'function') encoding();
     if (typeof callback === 'function') callback();
@@ -83,8 +83,16 @@ async function captureStdout(fn) {
     await fn();
     return output;
   } finally {
-    process.stdout.write = originalWrite;
+    stream.write = originalWrite;
   }
+}
+
+async function captureStdout(fn) {
+  return captureStream(process.stdout, fn);
+}
+
+async function captureStderr(fn) {
+  return captureStream(process.stderr, fn);
 }
 
 async function startMockOpenChamberServer(options = {}) {
@@ -665,6 +673,7 @@ describe('cli API target resolution', () => {
     })).rejects.toThrow('Multiple OpenChamber instances are running');
   });
 });
+
 
 describe('network-exposed auth validation', () => {
   it('allows loopback without a UI password', () => {

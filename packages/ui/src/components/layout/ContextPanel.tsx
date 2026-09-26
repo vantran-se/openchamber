@@ -36,6 +36,7 @@ import { ContextPanelContent } from './ContextSidebarTab';
 import { BrowserPane } from '@/components/browser/BrowserPane';
 import { browserUrlLabel } from '@/lib/browser/url';
 import { registerBrowserOpener } from '@/lib/browser/controlClient';
+import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
 import { getRuntimeBearerTokenSync, getRuntimeExtraHeadersSync } from '@/lib/runtime-auth';
 import { getRuntimeApiBaseUrl, getRuntimeKey } from '@/lib/runtime-switch';
 import { getActiveRelayDescriptor } from '@/lib/relay/runtime-tunnel';
@@ -52,7 +53,19 @@ import {
   type EmbeddedSessionRuntimeBootstrap,
 } from './contextPanelEmbeddedChat';
 const PluginPane = React.lazy(() => import('./PluginPane').then((module) => ({ default: module.PluginPane })));
+// How an extension page sits beside its shared surface: flex direction puts
+// the page first on top/left and last on bottom/right; the page's size is
+// fixed across the docked edge and the picture takes the rest.
+const DOCK_LAYOUT = {
+  top: { container: 'flex-col', page: 'border-b border-border', vertical: true },
+  bottom: { container: 'flex-col-reverse', page: 'border-t border-border', vertical: true },
+  left: { container: 'flex-row', page: 'border-r border-border', vertical: false },
+  right: { container: 'flex-row-reverse', page: 'border-l border-border', vertical: false },
+} as const;
+
+const GuestSurfacePane = React.lazy(() => import('./GuestSurfacePane').then((module) => ({ default: module.GuestSurfacePane })));
 import { useGuestsStore } from '@/lib/guests/store';
+import { guestHasSharedSurface, guestSurfaceDocking, type GuestSurfaceDocking } from '@/lib/guests/surfaces';
 import { FALLBACK_GUEST_ICON } from '@/lib/guests/icon';
 import { isPluginContextPanelMode, pluginIdFromMode } from '@/lib/surfaces/modes';
 import { getContextSurfaceWidthFraction } from '@/lib/surfaces/registry';
@@ -492,13 +505,24 @@ export const ContextPanel: React.FC = () => {
 
   // Lets an agent's browser.open create the tab it needs when none is open yet.
   // Registered from the panel because opening a tab is panel state, not
-  // something the browser view itself can do before it exists. Reveal the
-  // panel so Electron gives the webview a composited surface; capturePage()
-  // cannot capture the zero-width webview inside a closed panel.
+  // something the browser view itself can do before it exists. Background on
+  // purpose: an agent working a page must not pop the panel open or steal the
+  // active tab while the user reads something else. The tab appears in the
+  // strip; browser.capture shows it only for the moment of the screenshot.
   React.useEffect(() => {
     if (!effectiveDirectory) return;
-    return registerBrowserOpener((url) => openContextBrowser(effectiveDirectory, url));
+    return registerBrowserOpener((url) => openContextBrowser(effectiveDirectory, url, { reveal: false }));
   }, [effectiveDirectory, openContextBrowser]);
+  // The agent asked for a file to be shown. It opens in front of whatever tab
+  // the user had, on purpose: the agent is pointing at a result, and the prior
+  // tab is one click away.
+  const openContextFile = useUIStore((state) => state.openContextFile);
+  React.useEffect(() => subscribeOpenchamberEvents((event) => {
+    if (event.type !== 'file-open-request') return;
+    const directory = event.directory ?? effectiveDirectory;
+    if (!directory) return;
+    openContextFile(directory, event.path);
+  }), [effectiveDirectory, openContextFile]);
   const reorderContextPanelTabs = useUIStore((state) => state.reorderContextPanelTabs);
   const setSelectedFilePath = useFilesViewTabsStore((state) => state.setSelectedPath);
   const contextEditorTreeVisible = useUIStore((state) => state.contextEditorTreeVisible);
@@ -1052,6 +1076,20 @@ export const ContextPanel: React.FC = () => {
     () => tabs.filter((tab) => isPluginContextPanelMode(tab.mode)),
     [tabs],
   );
+  const guests = useGuestsStore((state) => state.guests);
+  const surfaceGuestIds = React.useMemo(
+    () => new Set(guests.filter(guestHasSharedSurface).map((guest) => guest.id)),
+    [guests],
+  );
+  // Surface extensions that also ship a page: it is docked to one edge of the picture.
+  const surfaceDockings = React.useMemo(() => {
+    const dockings = new Map<string, GuestSurfaceDocking>();
+    for (const guest of guests) {
+      const docking = guestSurfaceDocking(guest);
+      if (docking) dockings.set(guest.id, docking);
+    }
+    return dockings;
+  }, [guests]);
   const hasFileTabs = React.useMemo(
     () => tabs.some((tab) => tab.mode === 'file'),
     [tabs],
@@ -1341,10 +1379,13 @@ export const ContextPanel: React.FC = () => {
         {browserTabs.map((tab) => (
           <div
             key={tab.id}
+            // Invisible rather than display:none, so a background tab the agent
+            // is working keeps its layout and its snapshots read a real page.
             className={cn(
               'absolute inset-0',
-              activeTab?.id !== tab.id && 'hidden'
+              activeTab?.id !== tab.id && 'invisible pointer-events-none'
             )}
+            aria-hidden={activeTab?.id !== tab.id || undefined}
           >
             <BrowserPane initialUrl={tab.targetPath ?? ''} directory={directoryKey} tabID={tab.id} />
           </div>
@@ -1386,13 +1427,40 @@ export const ContextPanel: React.FC = () => {
         ) : null}
         {pluginTabs.map((tab) => {
           if (!isPluginContextPanelMode(tab.mode)) return null;
+          // A shared-surface extension's picture is drawn by the host and
+          // mounted only while shown, so an unwatched surface holds no socket
+          // and its service can idle out. Its own page, when it has one, is
+          // docked to one edge of the picture and stays mounted like any
+          // panel iframe.
+          const guestId = pluginIdFromMode(tab.mode);
+          const sharedSurface = surfaceGuestIds.has(guestId);
+          const docking = surfaceDockings.get(guestId);
+          const shown = activeTab?.id === tab.id;
+          const surfaceMounted = shown && isOpen;
+          if (sharedSurface && !docking && !surfaceMounted) return null;
           return (
             <div
               key={tab.id}
-              className={cn('absolute inset-0', activeTab?.id === tab.id ? 'block' : 'hidden')}
+              className={cn('absolute inset-0', shown ? 'block' : 'hidden')}
             >
               <React.Suspense fallback={null}>
-                <PluginPane mode={tab.mode} />
+                {!sharedSurface ? (
+                  <PluginPane mode={tab.mode} />
+                ) : !docking ? (
+                  <GuestSurfacePane mode={tab.mode} />
+                ) : (
+                  <div className={cn('flex h-full', DOCK_LAYOUT[docking.dock].container)}>
+                    <div
+                      className={cn('shrink-0', DOCK_LAYOUT[docking.dock].page)}
+                      style={DOCK_LAYOUT[docking.dock].vertical ? { height: docking.size } : { width: docking.size }}
+                    >
+                      <PluginPane mode={tab.mode} />
+                    </div>
+                    <div className="min-h-0 min-w-0 flex-1">
+                      {surfaceMounted ? <GuestSurfacePane mode={tab.mode} /> : null}
+                    </div>
+                  </div>
+                )}
               </React.Suspense>
             </div>
           );

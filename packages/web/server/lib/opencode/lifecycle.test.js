@@ -18,7 +18,14 @@ vi.mock('./startup-performance.js', () => ({
   recordStartupPerformance: recordStartupPerformanceMock,
 }));
 
-const { createOpenCodeLifecycleRuntime } = await import('./lifecycle.js');
+const {
+  createOpenCodeConnectionAdapter,
+  createOpenCodeLifecycleControls,
+  createOpenCodeLifecycleRuntime,
+  createOpenCodeRecoveryCallbacks,
+  createOpenCodeServerComposition,
+  resolveOpenCodeConnectionKind,
+} = await import('./lifecycle.js');
 
 const originalOpencodeBinary = process.env.OPENCODE_BINARY;
 const originalPath = process.env.PATH;
@@ -102,7 +109,8 @@ const createRuntime = (overrides = {}, stateOverrides = {}, envOverrides = {}) =
     waitForReady: vi.fn(async () => true),
     normalizeApiPrefix: vi.fn(() => ''),
     applyOpencodeBinaryFromSettings: vi.fn(async () => null),
-    ensureOpencodeCliEnv: vi.fn(),
+    checkOpenCodeBinary: async () => '2.0.14',
+  ensureOpencodeCliEnv: vi.fn(),
     ensureLocalOpenCodeServerPassword: vi.fn(async () => 'password'),
     resolveManagedOpenCodeLaunchSpec: vi.fn((binary) => ({ binary, args: [], wrapperType: null })),
     setOpenCodePort: vi.fn((port) => {
@@ -114,6 +122,8 @@ const createRuntime = (overrides = {}, stateOverrides = {}, envOverrides = {}) =
     clearResolvedOpenCodeBinary: vi.fn(),
     buildAugmentedPath: vi.fn(() => '/home/user/.bun/bin:/usr/local/bin:/usr/bin'),
     buildManagedOpenCodePath: vi.fn(() => '/home/user/.bun/bin:/usr/local/bin:/usr/bin'),
+    // Never let a test touch the real `~/.local/share/opencode/opencode.db`.
+    topUpV1SessionMigration: vi.fn(() => ({ status: 'skipped', missing: 0, revisited: 0, reason: 'no-database' })),
     getManagedOpenCodeShellEnvSnapshot: vi.fn(() => ({
       PATH: '/home/user/.bun/bin:/usr/local/bin:/usr/bin',
       SHELL_ONLY: 'yes',
@@ -124,6 +134,226 @@ const createRuntime = (overrides = {}, stateOverrides = {}, envOverrides = {}) =
   runtime.testState = state;
   return runtime;
 };
+
+describe('OpenCode connection composition', () => {
+  it('selects shared-local for Web without an explicit host', () => {
+    expect(resolveOpenCodeConnectionKind({ runtime: 'web', configuredHost: null })).toBe('shared-local');
+  });
+
+  it('selects explicit-external when a host is configured', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'web',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+    })).toBe('explicit-external');
+  });
+
+  it('keeps Desktop on the managed-owned lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({ runtime: 'desktop', configuredHost: null })).toBe('managed-owned');
+  });
+
+  it('gives an explicit host priority over the Desktop managed lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'desktop',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+    })).toBe('explicit-external');
+  });
+
+  it('keeps an embedded managed override on the managed-owned lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'web',
+      configuredHost: null,
+      lifecycleMode: 'managed',
+    })).toBe('managed-owned');
+  });
+
+  it('requires a shared runtime factory for shared-local composition', () => {
+    expect(() => createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: null,
+    })).toThrow('Shared OpenCode composition requires a shared runtime factory');
+  });
+
+  it('creates shared and managed-only runtimes only for their owning connection kind', () => {
+    const sharedRuntime = { getBaseUrl: () => null, getHeaders: () => ({}) };
+    const managedPluginRuntime = { buildManagedChildEnv: () => ({}) };
+    const createSharedRuntime = vi.fn(() => sharedRuntime);
+    const createManagedPluginRuntime = vi.fn(() => managedPluginRuntime);
+
+    const shared = createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: null,
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+    const external = createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+    const desktop = createOpenCodeServerComposition({
+      runtime: 'desktop',
+      configuredHost: null,
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+
+    expect(shared.sharedRuntime).toBe(sharedRuntime);
+    expect(shared.managedPluginRuntime).toBeNull();
+    expect(external.sharedRuntime).toBeNull();
+    expect(external.managedPluginRuntime).toBeNull();
+    expect(desktop.sharedRuntime).toBeNull();
+    expect(desktop.managedPluginRuntime).toBe(managedPluginRuntime);
+    expect(createSharedRuntime).toHaveBeenCalledTimes(1);
+    expect(createManagedPluginRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers the shared service through the production callback without interrupting sessions', async () => {
+    const restartManaged = vi.fn(async () => {});
+    const triggerManagedHealthCheck = vi.fn(async () => {});
+    const recoverShared = vi.fn(async () => {});
+    const resetOpenCodeRuntimeProviders = vi.fn();
+    const rebindUpstream = vi.fn();
+    const interruptBusySessionsAfterRestart = vi.fn(() => ({ sessionIds: [] }));
+    const broadcastUiNotification = vi.fn();
+    const callbacks = createOpenCodeRecoveryCallbacks({
+      resetOpenCodeRuntimeProviders,
+      rebindUpstream,
+      interruptBusySessionsAfterRestart,
+      broadcastUiNotification,
+    });
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: restartManaged,
+      triggerLifecycleHealthCheck: triggerManagedHealthCheck,
+      recoverShared,
+      onSharedRecovered: callbacks.onSharedRecovered,
+    });
+
+    await shared.restart('manual');
+
+    expect(recoverShared).toHaveBeenCalledOnce();
+    expect(resetOpenCodeRuntimeProviders).toHaveBeenCalledOnce();
+    expect(rebindUpstream).toHaveBeenCalledOnce();
+    expect(recoverShared.mock.invocationCallOrder[0]).toBeLessThan(rebindUpstream.mock.invocationCallOrder[0]);
+    expect(interruptBusySessionsAfterRestart).not.toHaveBeenCalled();
+    expect(broadcastUiNotification).not.toHaveBeenCalled();
+    expect(restartManaged).not.toHaveBeenCalled();
+    expect(triggerManagedHealthCheck).not.toHaveBeenCalled();
+  });
+
+  it('keeps managed restart interruption behavior in the production callback', () => {
+    const resetOpenCodeRuntimeProviders = vi.fn();
+    const rebindUpstream = vi.fn();
+    const interruptBusySessionsAfterRestart = vi.fn(() => ({ sessionIds: ['session-1'] }));
+    const broadcastUiNotification = vi.fn();
+    const callbacks = createOpenCodeRecoveryCallbacks({
+      resetOpenCodeRuntimeProviders,
+      rebindUpstream,
+      interruptBusySessionsAfterRestart,
+      broadcastUiNotification,
+    });
+
+    callbacks.onManagedRestarted();
+
+    expect(resetOpenCodeRuntimeProviders).toHaveBeenCalledOnce();
+    expect(rebindUpstream).toHaveBeenCalledOnce();
+    expect(interruptBusySessionsAfterRestart).toHaveBeenCalledOnce();
+    expect(broadcastUiNotification).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'opencode-restart-interrupted',
+      sessionId: 'session-1',
+    }));
+  });
+
+  it('shares concurrent shared recovery attempts', async () => {
+    let finishRecovery;
+    const recoverShared = vi.fn(() => new Promise((resolve) => {
+      finishRecovery = resolve;
+    }));
+    const onSharedRecovered = vi.fn(async () => {});
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: vi.fn(),
+      triggerLifecycleHealthCheck: vi.fn(),
+      recoverShared,
+      onSharedRecovered,
+    });
+
+    const first = shared.triggerHealthCheck();
+    const second = shared.triggerHealthCheck();
+    await vi.waitFor(() => expect(recoverShared).toHaveBeenCalledOnce());
+    finishRecovery();
+    await Promise.all([first, second]);
+
+    expect(recoverShared).toHaveBeenCalledOnce();
+    expect(onSharedRecovered).toHaveBeenCalledOnce();
+  });
+
+  it('contains shared health recovery failures and permits a later retry', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const recoverShared = vi.fn()
+      .mockRejectedValueOnce(new Error('service unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const onSharedRecovered = vi.fn(async () => {});
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: vi.fn(),
+      triggerLifecycleHealthCheck: vi.fn(),
+      recoverShared,
+      onSharedRecovered,
+    });
+
+    await expect(shared.triggerHealthCheck()).resolves.toBeUndefined();
+    await expect(shared.restart()).resolves.toBeUndefined();
+
+    expect(recoverShared).toHaveBeenCalledTimes(2);
+    expect(onSharedRecovered).toHaveBeenCalledOnce();
+  });
+
+  it('preserves managed lifecycle controls', async () => {
+    const restartManaged = vi.fn(async () => {});
+    const triggerManagedHealthCheck = vi.fn(async () => {});
+    const managed = createOpenCodeLifecycleControls({
+      getKind: () => 'managed-owned',
+      restartLifecycle: restartManaged,
+      triggerLifecycleHealthCheck: triggerManagedHealthCheck,
+    });
+
+    await managed.restart('manual');
+    await managed.triggerHealthCheck();
+
+    expect(restartManaged).toHaveBeenCalledWith('manual');
+    expect(triggerManagedHealthCheck).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a shared runtime for shared-local composition', () => {
+    expect(() => createOpenCodeConnectionAdapter({ kind: 'shared-local' })).toThrow(
+      'Shared OpenCode connection requires a shared service runtime',
+    );
+  });
+
+  it('reads shared URL and auth from the shared runtime at call time without owning its process', () => {
+    let baseUrl = 'http://127.0.0.1:4096';
+    let headers = { authorization: 'Basic first' };
+    const adapter = createOpenCodeConnectionAdapter({
+      kind: 'shared-local',
+      sharedRuntime: {
+        getBaseUrl: () => baseUrl,
+        getHeaders: () => ({ ...headers }),
+      },
+    });
+
+    expect(adapter.getOpenCodeConnectionKind()).toBe('shared-local');
+    expect(adapter.getOpenCodeBaseUrl()).toBe('http://127.0.0.1:4096');
+    expect(adapter.getOpenCodeAuthHeaders()).toEqual({ authorization: 'Basic first' });
+    expect(adapter.ownsOpenCodeProcess()).toBe(false);
+
+    baseUrl = 'http://127.0.0.1:5096';
+    headers = { authorization: 'Basic replacement' };
+    expect(adapter.getOpenCodeBaseUrl()).toBe('http://127.0.0.1:5096');
+    expect(adapter.getOpenCodeAuthHeaders()).toEqual({ authorization: 'Basic replacement' });
+  });
+});
 
 describe('OpenCode lifecycle', () => {
   it('uses the resolved binary directly on startup and managed restart without an env override', async () => {
@@ -158,7 +388,7 @@ describe('OpenCode lifecycle', () => {
   it('records an authoritative ready terminal event for external startup', async () => {
     globalThis.fetch = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ healthy: true }),
+      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     const runtime = createRuntime({
       env: {
@@ -190,7 +420,7 @@ describe('OpenCode lifecycle', () => {
   it('recovers an external OPENCODE_HOST connection using its configured endpoint', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ healthy: true }),
+      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     globalThis.fetch = fetchMock;
     const runtime = createRuntime({}, {
@@ -206,7 +436,7 @@ describe('OpenCode lifecycle', () => {
     await runtime.restartOpenCode();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://seamus:4095/global/health',
+      'http://seamus:4095/api/info',
       expect.objectContaining({ method: 'GET' }),
     );
     expect(runtime.testState.openCodePort).toBe(4095);
@@ -240,7 +470,7 @@ describe('OpenCode lifecycle', () => {
   it('warms recently used directories after a successful bootstrap', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ healthy: true }),
+      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     globalThis.fetch = fetchMock;
     const runtime = createRuntime({
@@ -260,10 +490,10 @@ describe('OpenCode lifecycle', () => {
 
     const warmupUrls = fetchMock.mock.calls
       .map(([url]) => String(url))
-      .filter((url) => url.includes('/session/status'));
+      .filter((url) => url.includes('/api/session?'));
     expect(warmupUrls).toEqual([
-      'http://127.0.0.1:45678/session/status?directory=%2Ftmp%2Fworktree-a',
-      'http://127.0.0.1:45678/session/status?directory=%2Ftmp%2Fproject-b',
+      'http://127.0.0.1:45678/api/session?directory=%2Ftmp%2Fworktree-a&limit=1',
+      'http://127.0.0.1:45678/api/session?directory=%2Ftmp%2Fproject-b&limit=1',
     ]);
   });
 
@@ -876,6 +1106,28 @@ describe('OpenCode lifecycle', () => {
     expect(spawnMock).toHaveBeenCalledTimes(2);
     await server.close();
   });
+
+  it('tops up the v1 session migration before spawning managed OpenCode', async () => {
+    const calls = [];
+    const topUpV1SessionMigration = vi.fn(() => {
+      calls.push('top-up');
+      return { status: 'scheduled', missing: 3, revisited: 0 };
+    });
+    spawnMock.mockImplementation(() => {
+      calls.push('spawn');
+      const child = createMockChild();
+      queueMicrotask(() => child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n'));
+      return child;
+    });
+    globalThis.fetch = vi.fn(async () => ({ ok: false }));
+
+    const runtime = createRuntime({ topUpV1SessionMigration });
+    await runtime.startOpenCode();
+
+    expect(topUpV1SessionMigration).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['top-up', 'spawn']);
+  });
+
 });
 
 describe('killProcessOnPort on Windows', () => {
@@ -943,4 +1195,51 @@ describe('killProcessOnPort on Windows', () => {
 
     expect(spawnSyncMock).not.toHaveBeenCalledWith('taskkill', expect.anything(), expect.anything());
   });
+});
+
+it('shares the managed CLI preflight with desktop while startup is pending', async () => {
+  let finish;
+  let entered;
+  const checking = new Promise(resolve => { entered = resolve; });
+  const check = new Promise(resolve => { finish = resolve; });
+  let checks = 0;
+  const runtime = createRuntime({
+    checkOpenCodeBinary: () => { checks += 1; entered(); return check; },
+    ensureOpencodeCliEnv: () => '/tmp/opencode',
+  });
+  spawnMock.mockImplementation(() => {
+    const child = createMockChild();
+    queueMicrotask(() => child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n'));
+    return child;
+  });
+  expect(await runtime.getManagedOpenCodePreflight()).toBe(false);
+  const starting = runtime.startOpenCode();
+  await checking;
+  const desktopVerdict = runtime.getManagedOpenCodePreflight();
+  expect(runtime.testState.isOpenCodeReady).toBe(false);
+  finish('2.0.15');
+  expect(await desktopVerdict).toBe(true);
+  expect(checks).toBe(1);
+  const server = await starting;
+  try {
+    expect(await runtime.getManagedOpenCodePreflight()).toBe(true);
+    runtime.testState.isExternalOpenCode = true;
+    expect(await runtime.getManagedOpenCodePreflight()).toBe(false);
+    runtime.testState.isExternalOpenCode = false;
+    runtime.testState.isShuttingDown = true;
+    expect(await runtime.getManagedOpenCodePreflight()).toBe(false);
+  } finally {
+    await server.close();
+  }
+});
+
+it('a rejected CLI preflight never permits desktop bootstrap', async () => {
+  const runtime = createRuntime({
+    checkOpenCodeBinary: async () => {
+      throw Object.assign(new Error('Unsupported CLI'), { code: 'OPENCODE_BINARY_INVALID' });
+    },
+  });
+  await expect(runtime.startOpenCode()).rejects.toThrow('Unsupported CLI');
+  expect(await runtime.getManagedOpenCodePreflight()).toBe(false);
+  expect(spawnMock).not.toHaveBeenCalled();
 });
