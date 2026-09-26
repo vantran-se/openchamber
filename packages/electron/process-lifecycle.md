@@ -2,7 +2,7 @@
 
 ## Launch paths
 
-Desktop's main process hosts `@openchamber/web` in-process under Electron's
+Desktop's main process hosts `@vantran-se/openchamber-web` in-process under Electron's
 Node runtime. Its Git commands use Node `child_process` and `simple-git`, not
 `Bun.spawn`.
 

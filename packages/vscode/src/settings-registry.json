@@ -123,7 +123,13 @@
     "browserProvider": {
       "scope": "instance"
     },
+    "agentNotifyToolEnabled": {
+      "scope": "instance"
+    },
     "agentMemoryToolEnabled": {
+      "scope": "instance"
+    },
+    "isolatedSpacesEnabled": {
       "scope": "instance"
     },
     "agentMemoryFeatureAvailable": {
@@ -220,6 +226,9 @@
       "perSurface": true
     },
     "sidebarProjectSortOrder": {
+      "scope": "profile"
+    },
+    "sidebarWorktreeSortOrder": {
       "scope": "profile"
     },
     "sidebarShowRecentSection": {
@@ -671,6 +680,14 @@
       "local": true
     },
     "walkthroughTocWidth": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileListMode": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileTreeWidth": {
       "scope": "device",
       "local": true
     },

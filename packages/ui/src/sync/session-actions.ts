@@ -36,6 +36,7 @@ import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { requestSessionArchiveBatch, requestSessionMetadataUpdate, requestSessionUnarchiveBatch, type SessionArchiveStamp } from "./session-archive-batch"
 import { registerBulkArchiveEchoes, releaseBulkArchiveEchoes } from "./bulk-archive-echo"
 import { getRuntimeKey } from "@/lib/runtime-switch"
+import { isRelayModeActive } from "@/lib/relay/runtime-tunnel"
 import { getErrorStatus, isAmbiguousSendFailure } from "./send-failure-classification"
 import { getStaleRunningToolMessageID } from "./materialization"
 import { promoteRestoredSessionOrdering } from "./session-ordering"
@@ -46,6 +47,9 @@ import { deleteChatDirectory } from "@/lib/chatDirectories"
 import { createChatDraftIdentity } from "@/lib/chatDraftPersistence"
 import { cancelSessionTitleGeneration } from "./session-title-generation"
 import { recordSessionActionFailure } from "./session-action-failures"
+import { applyForkInheritance } from "@/lib/sessionForkInheritance"
+import { getSessionGoal } from "@/lib/sessionGoalMetadata"
+import { fetchGoalObjectiveContent, writeGoalObjectiveFile } from "@/lib/goalObjectiveFiles"
 
 const MESSAGE_REFETCH_LIMIT = 100
 const SEND_CONFIRMATION_REFETCH_LIMIT = 30
@@ -346,14 +350,21 @@ function connectionLostError(): Error {
 // blip) otherwise surface as a hard "Connection lost" toast even though the
 // pipeline recovers within a second. While waiting, run bounded health probes
 // inside the same grace window so stale disconnected state can recover quickly.
+// A relayed round trip crosses the relay twice (client -> relay -> host and
+// back), so a healthy but distant host can easily need more than 500 ms.
 const CONNECTION_GRACE_MS = 2000
+const CONNECTION_PROBE_MS = 500
+const RELAY_CONNECTION_GRACE_MS = 3000
+const RELAY_CONNECTION_PROBE_MS = 3000
 export async function waitForConnectionOrThrow(): Promise<void> {
-  const deadline = Date.now() + CONNECTION_GRACE_MS
+  const relayed = isRelayModeActive()
+  const deadline = Date.now() + (relayed ? RELAY_CONNECTION_GRACE_MS : CONNECTION_GRACE_MS)
+  const probeMs = relayed ? RELAY_CONNECTION_PROBE_MS : CONNECTION_PROBE_MS
   while (Date.now() < deadline) {
     if (useConfigStore.getState().isConnected) return
     const remainingMs = deadline - Date.now()
     if (remainingMs <= 0) break
-    if (await useConfigStore.getState().probeConnection({ timeoutMs: Math.min(500, remainingMs) })) return
+    if (await useConfigStore.getState().probeConnection({ timeoutMs: Math.min(probeMs, remainingMs) })) return
     const sleepMs = Math.min(100, deadline - Date.now())
     if (sleepMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, sleepMs))
@@ -413,7 +424,8 @@ function hasAuthoritativeIdleCoverage(sessionId: string, stores: ChildStoreManag
     ?? findSessionDirectoryInChildStores(sessionId)
   if (!directory) return false
   const state = stores.getChild(directory)?.getState()
-  return state?.sessionStatusReady === true || state?.session_status[sessionId]?.type === "idle"
+  return (state?.sessionStatusReady === true && !state.sessionStatusInvalidated?.[sessionId])
+    || state?.session_status[sessionId]?.type === "idle"
 }
 
 function resolveKnownSessionDirectory(sessionId: string): string | null {
@@ -626,9 +638,22 @@ function contextCarriersForMessage(messages: readonly Message[], messageID: stri
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
     const candidate = messages[cursor]
     if (candidate.role !== "synthetic") break
-    carriers.unshift({ type: candidate.role, metadata: candidate.metadata })
+    carriers.unshift({ metadata: candidate.metadata })
   }
   return carriers
+}
+
+/**
+ * Where a revert or fork of a user message cuts the transcript: at the first
+ * of its context carriers, so the carriers leave together with the message.
+ * Cutting at the message itself would leave them in place, and the next prompt
+ * would be sent with the reverted context attached a second time.
+ */
+function transcriptCutForMessage(messages: readonly Message[], messageID: string): string {
+  const index = messages.findIndex((message) => message.id === messageID)
+  let first = index
+  while (first > 0 && messages[first - 1].role === "synthetic") first -= 1
+  return first >= 0 ? messages[first].id : messageID
 }
 
 /**
@@ -1010,7 +1035,7 @@ export async function patchSessionMetadata(
   // explicitly. A runtime without that route cannot persist the change, and
   // reporting success would strand a review or btw link that the next load
   // silently drops.
-  const result = await requestSessionMetadataUpdate(sessionId, buildMetadataMergePatch(currentMetadata, nextMetadata))
+  const result = await requestSessionMetadataUpdate(sessionId, buildMetadataMergePatch(currentMetadata, nextMetadata), targetDirectory)
   if (result.outcome !== "updated") throw new Error(`session metadata update failed: ${result.reason}`)
   const updated: Session = { ...current, metadata: result.metadata }
   if (isStaleRuntime(expectedRuntimeKey)) throw new Error("runtime changed")
@@ -1093,7 +1118,7 @@ async function cleanupReviewMetadataBeforeDelete(
 }
 
 /** Remove a server-confirmed session from every live child store that has it. */
-function removeSessionFromLiveStores(sessionId: string, preferredDirectory?: string): SessionListSnapshot[] {
+function removeSessionFromLiveStores(sessionId: string, preferredDirectory?: string, archive = false): SessionListSnapshot[] {
   if (!_childStores) return []
 
   const snapshots: SessionListSnapshot[] = []
@@ -1119,10 +1144,16 @@ function removeSessionFromLiveStores(sessionId: string, preferredDirectory?: str
       continue
     }
     snapshots.push({ directory })
-    store.setState({
+    const patch: Partial<ReturnType<DirectoryStoreApi["getState"]>> = {
       session: current.session.filter((session) => session.id !== sessionId),
       ...sessionMutationPatch(current, sessionId, true),
-    })
+    }
+    if (archive) {
+      patch.session_status = { ...current.session_status }
+      delete patch.session_status[sessionId]
+      patch.sessionStatusInvalidated = { ...current.sessionStatusInvalidated, [sessionId]: true }
+    }
+    store.setState(patch)
   }
 
   return snapshots
@@ -1136,7 +1167,7 @@ function removeSessionFromLiveStores(sessionId: string, preferredDirectory?: str
  * the sidebar — once per session, which is what made archiving a worktree's
  * sessions block the main thread for seconds.
  */
-function removeSessionsFromLiveStores(sessionIds: Iterable<string>, preferredDirectory?: string): SessionListSnapshot[] {
+function removeSessionsFromLiveStores(sessionIds: Iterable<string>, preferredDirectory?: string, archive = false): SessionListSnapshot[] {
   const ids = new Set(sessionIds)
   if (!_childStores || ids.size === 0) return []
 
@@ -1163,10 +1194,19 @@ function removeSessionsFromLiveStores(sessionIds: Iterable<string>, preferredDir
     if (removed.length === 0) continue
 
     snapshots.push({ directory })
-    store.setState({
+    const patch: Partial<ReturnType<DirectoryStoreApi["getState"]>> = {
       session: current.session.filter((session) => !ids.has(session.id)),
       ...sessionsMutationPatch(current, removed, true),
-    })
+    }
+    if (archive) {
+      patch.session_status = { ...current.session_status }
+      patch.sessionStatusInvalidated = { ...current.sessionStatusInvalidated }
+      for (const id of removed) {
+        delete patch.session_status[id]
+        patch.sessionStatusInvalidated[id] = true
+      }
+    }
+    store.setState(patch)
   }
 
   return snapshots
@@ -1192,6 +1232,13 @@ function finalizeConfirmedSessionDeletion(
   expectedRuntimeKey = getRuntimeKey(),
 ): void {
   const snapshots = removeSessionFromLiveStores(sessionId, sessionDirectory)
+  for (const store of _childStores?.children.values() ?? []) {
+    const invalidated = store.getState().sessionStatusInvalidated
+    if (!invalidated?.[sessionId]) continue
+    const next = { ...invalidated }
+    delete next[sessionId]
+    store.setState({ sessionStatusInvalidated: next })
+  }
   invalidateSessionLoads(sessionId, [...snapshots.map((snapshot) => snapshot.directory), sessionDirectory])
   useGlobalSessionsStore.getState().removeSessions([sessionId])
   const ui = useSessionUIStore.getState()
@@ -1404,7 +1451,7 @@ export async function archiveSession(sessionId: string, expectedRuntimeKey = get
       throw new Error("archive failed: server did not return the archived session")
     }
     const archived = withArchivedAt(sessionId, stamp.archivedAt)
-    const snapshots = removeSessionFromLiveStores(sessionId, sessionDirectory)
+    const snapshots = removeSessionFromLiveStores(sessionId, sessionDirectory, true)
     invalidateSessionLoads(sessionId, [...snapshots.map((snapshot) => snapshot.directory), sessionDirectory])
     if (archived) useGlobalSessionsStore.getState().upsertSession(archived)
     const ui = useSessionUIStore.getState()
@@ -1571,7 +1618,7 @@ function commitArchivedSessions(stamps: SessionArchiveStamp[], directory: string
 
   const ids = stamps.map((stamp) => stamp.id)
   const archived = stamps.flatMap((stamp) => withArchivedAt(stamp.id, stamp.archivedAt) ?? [])
-  const snapshots = removeSessionsFromLiveStores(ids, directory)
+  const snapshots = removeSessionsFromLiveStores(ids, directory, true)
   const directories = [...snapshots.map((snapshot) => snapshot.directory), directory]
   for (const id of ids) invalidateSessionLoads(id, directories)
 
@@ -1594,7 +1641,7 @@ export async function unarchiveSession(sessionId: string, expectedRuntimeKey = g
   if (isStaleRuntime(expectedRuntimeKey)) return false
   const sessionDirectory = getSessionDirectory(sessionId)
   try {
-    const result = await requestSessionUnarchiveBatch([sessionId])
+    const result = await requestSessionUnarchiveBatch([sessionId], sessionDirectory)
     if (isStaleRuntime(expectedRuntimeKey)) return false
     if (result.outcome !== "restored") {
       throw new Error(`unarchive failed: ${result.reason}`)
@@ -1606,6 +1653,27 @@ export async function unarchiveSession(sessionId: string, expectedRuntimeKey = g
     if (restored) useGlobalSessionsStore.getState().upsertSession(restored)
     if (sessionDirectory) registerSessionDirectory(sessionId, sessionDirectory)
     promoteRestoredSessionOrdering(sessionId)
+    // Archive discarded this session's status. An older directory snapshot
+    // cannot certify it idle after restore; only a fresh live read can.
+    const store = sessionDirectory ? _childStores?.getChild(sessionDirectory) : undefined
+    if (store) {
+      const before = store.getState()
+      // The restore already committed. A rejected status read is unknown, not
+      // an action failure or a reason to mark this session idle.
+      const statuses = await opencodeClient.getActiveSessionStatuses().catch(() => null)
+      if (!isStaleRuntime(expectedRuntimeKey) && statuses !== null) {
+        store.setState((current) => {
+          if (current.sessionStatusInvalidated !== before.sessionStatusInvalidated
+            || current.session_status[sessionId] !== before.session_status[sessionId]) return current
+          const invalidated = { ...current.sessionStatusInvalidated }
+          delete invalidated[sessionId]
+          return {
+            session_status: { ...current.session_status, [sessionId]: statuses[sessionId] ?? { type: "idle" } },
+            sessionStatusInvalidated: invalidated,
+          }
+        })
+      }
+    }
     return true
   } catch (error) {
     console.error("[session-actions] unarchiveSession failed", error)
@@ -2224,6 +2292,7 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
     // the synthetic messages before this one and belongs back on the chips.
     submittedContextParts = contextCarriersForMessage(messages, messageId)
   }
+  const revertMessageID = transcriptCutForMessage(messages, messageId)
 
   // Optimistically set only the revert marker. Keep messages and parts in the
   // local store; visible-message selectors derive the displayed timeline from
@@ -2234,7 +2303,7 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
   const sessionIdx = sessions.findIndex((s) => s.id === sessionId)
 
   if (sessionIdx >= 0) {
-    sessions[sessionIdx] = { ...sessions[sessionIdx], revert: { messageID: messageId } }
+    sessions[sessionIdx] = { ...sessions[sessionIdx], revert: { messageID: revertMessageID } }
     store.setState({ session: sessions })
   }
 
@@ -2269,7 +2338,7 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
     await cascadeRevertToDescendants(sessionId, targetMessage.time.created)
     // Stage only: the messages disappear behind the revert marker while the
     // dock offers Commit (finalize) or Clear (bring them back).
-    await opencodeClient.stageRevert(sessionId, messageId, { directory })
+    await opencodeClient.stageRevert(sessionId, revertMessageID, { directory })
     const revertedSession = await opencodeClient.getSession(sessionId, directory)
     const current = store.getState()
     const updated = [...current.session]
@@ -2340,12 +2409,29 @@ function openForkedSession(store: DirectoryStoreApi, forkedSession: Session, dir
 }
 
 /**
+ * The fork keeps the source's goal (OpenCode copies metadata) but not the
+ * source's btw/review links; a file-backed objective is copied to the fork.
+ * The objective copy re-reads the fork's goal id first and is skipped when the
+ * user armed a new goal on the fork in the meantime.
+ */
+function inheritForkMetadata(sourceSessionId: string, forkedSession: Session, directory: string | null | undefined, expectedRuntimeKey: string) {
+  return applyForkInheritance(sourceSessionId, forkedSession, {
+    readGoalId: async (sessionId) => getSessionGoal(await opencodeClient.getSession(sessionId, directory))?.id ?? null,
+    readObjective: fetchGoalObjectiveContent,
+    writeObjective: writeGoalObjectiveFile,
+    patchMetadata: async (sessionId, updater) => {
+      await patchSessionMetadata(sessionId, directory, updater, expectedRuntimeKey)
+    },
+  })
+}
+
+/**
  * Fork keeping an assistant turn: the new session holds everything through
  * `messageId`, so the agent there still sees the answer it just gave. The cut
  * is the first user message after it; with none, the whole transcript is copied.
  * The composer stays empty since there is no prompt to rewrite.
  */
-export async function forkAfterMessage(sessionId: string, messageId: string): Promise<void> {
+export async function forkAfterMessage(sessionId: string, messageId: string): Promise<Session | null> {
   const expectedRuntimeKey = getRuntimeKey()
   const { store, directory } = dirStoreForSession(sessionId)
   const messages = store.getState().message[sessionId] ?? []
@@ -2353,9 +2439,60 @@ export async function forkAfterMessage(sessionId: string, messageId: string): Pr
   if (index < 0) throw new Error("Fork source message is not loaded")
   const nextUserMessage = messages.slice(index + 1).find((message) => message.role === "user")
 
-  const forkedSession = await opencodeClient.forkSession(sessionId, { before: nextUserMessage?.id, directory })
-  if (isStaleRuntime(expectedRuntimeKey)) return
-  openForkedSession(store, forkedSession, resolveSessionOwnedDirectory(forkedSession) ?? directory)
+  const forkedSession = await opencodeClient.forkSession(sessionId, {
+    before: nextUserMessage ? transcriptCutForMessage(messages, nextUserMessage.id) : undefined,
+    directory,
+  })
+  if (isStaleRuntime(expectedRuntimeKey)) return null
+  const forkDirectory = resolveSessionOwnedDirectory(forkedSession) ?? directory
+  openForkedSession(store, forkedSession, forkDirectory)
+  await inheritForkMetadata(sessionId, forkedSession, forkDirectory, expectedRuntimeKey)
+  return forkedSession
+}
+
+/**
+ * The last assistant message of the last finished turn, or null when there is
+ * none. While a turn runs, everything from its prompt (the last user message)
+ * on is excluded: a step inside it can already carry `time.completed` while the
+ * turn keeps going, so only turns before it count as stable.
+ */
+export function findLastCompletedTurnMessageId(messages: readonly Message[], turnRunning: boolean): string | null {
+  let end = messages.length
+  if (turnRunning) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user") {
+        end = index
+        break
+      }
+    }
+  }
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === "assistant" && message.time.completed !== undefined) return message.id
+  }
+  return null
+}
+
+/** The session has no finished turn yet, so a fork would copy nothing stable. */
+export class NothingToForkError extends Error {
+  constructor() {
+    super("No completed turn to fork from")
+    this.name = "NothingToForkError"
+  }
+}
+
+/**
+ * `/fork`: fork after the last finished turn and open the fork. A running turn
+ * in the source session is left alone and not copied.
+ */
+export async function forkFromLastCompletedTurn(sessionId: string): Promise<Session | null> {
+  const { store } = dirStoreForSession(sessionId)
+  const state = store.getState()
+  const status = state.session_status?.[sessionId]
+  const turnRunning = status !== undefined && status.type !== "idle"
+  const messageId = findLastCompletedTurnMessageId(state.message[sessionId] ?? [], turnRunning)
+  if (!messageId) throw new NothingToForkError()
+  return forkAfterMessage(sessionId, messageId)
 }
 
 /**
@@ -2380,7 +2517,10 @@ export async function forkFromMessage(sessionId: string, messageId: string): Pro
     .trim()
   const fileParts = parts.filter((part): part is FilePart => part.type === "file")
 
-  const forkedSession = await opencodeClient.forkSession(sessionId, { before: messageId, directory })
+  const forkedSession = await opencodeClient.forkSession(sessionId, {
+    before: transcriptCutForMessage(state.message[sessionId] ?? [], messageId),
+    directory,
+  })
   if (isStaleRuntime(expectedRuntimeKey)) return
   const target = createChatDraftIdentity(expectedRuntimeKey, resolveSessionOwnedDirectory(forkedSession) ?? directory, forkedSession.id)
   if (!target) throw new Error("Forked session has no composer directory")
@@ -2406,6 +2546,7 @@ export async function forkFromMessage(sessionId: string, messageId: string): Pro
     contextCarriersForMessage(state.message[sessionId] ?? [], messageId),
     { directory: target.directory, sessionKey: forkedSession.id },
   )
+  await inheritForkMetadata(sessionId, forkedSession, target.directory, expectedRuntimeKey)
 }
 
 export async function fetchMessagesForSession(sessionID: string, directory?: string | null): Promise<void> {

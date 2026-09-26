@@ -30,6 +30,7 @@ import { mergeModelMetadataWithLiveModel } from '@/lib/modelMetadata';
 import { getModelDisplayName as getSharedModelDisplayName } from '@/lib/modelDisplay';
 import { getEditModeColors } from '@/lib/permissions/editModeColors';
 import { cn } from '@/lib/utils';
+import { agentLabel } from '@/lib/agentLabel';
 import { matchesRankQuery, rankByQuery } from '@/lib/search/fuzzySearch';
 import { useContextStore } from '@/stores/contextStore';
 import { useConfigStore, isStaleAutoSelection } from '@/stores/useConfigStore';
@@ -215,7 +216,6 @@ const formatReleaseDate = (value: Date) => new Intl.DateTimeFormat(getCurrentInt
     year: 'numeric',
 }).format(value);
 
-const ADD_PROVIDER_ID = '__add_provider__';
 
 const IconBadge: React.FC<{ iconName: IconComponent; label: string }> = ({ iconName, label }) => (
     <span
@@ -348,7 +348,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const modelSelectionReady = Boolean(currentModelId) || (selection ? isReady : defaultsLoaded && providersResolved && agentsResolved);
     const agentSelectionReady = Boolean(currentAgentName) || (selection ? canSelectAgent : defaultsLoaded && agentsResolved);
     const setProvider = useConfigStore((state) => state.setProvider);
-    const setSelectedProvider = useConfigStore((state) => state.setSelectedProvider);
+    const requestProviderConnect = useUIStore((state) => state.setSettingsProvidersConnectRequested);
     const setModel = useConfigStore((state) => state.setModel);
     const setCurrentVariant = useConfigStore((state) => state.setCurrentVariant);
     const setCurrentVariantOverride = useConfigStore((state) => state.setCurrentVariantOverride);
@@ -481,12 +481,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const agentMenuOpen = isModelSelectorOpen;
     const setAgentMenuOpen = selection ? setLocalModelSelectorOpen : setModelSelectorOpen;
     const openAddProviderSettings = React.useCallback(() => {
-        setSelectedProvider(ADD_PROVIDER_ID);
+        requestProviderConnect(true);
         setSettingsPage('providers');
         setSettingsDialogOpen(true);
         setAgentMenuOpen(false);
         closeMobilePanel();
-    }, [setSelectedProvider, setSettingsPage, setSettingsDialogOpen, setAgentMenuOpen, closeMobilePanel]);
+    }, [requestProviderConnect, setSettingsPage, setSettingsDialogOpen, setAgentMenuOpen, closeMobilePanel]);
     const [desktopModelQuery, setDesktopModelQuery] = React.useState('');
     const keyboardOwnsModelSelectionRef = React.useRef(false);
     const lastModelPointerPositionRef = React.useRef<{ x: number; y: number } | null>(null);
@@ -560,7 +560,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
     const sortedAndFilteredAgents = React.useMemo(() => {
         const sorted = [...selectableDesktopAgents].sort((a, b) => a.name.localeCompare(b.name));
-        return rankByQuery(sorted, agentSearchQuery, (agent) => [agent.name, agent.description]);
+        return rankByQuery(sorted, agentSearchQuery, (agent) => [agent.name, agent.displayName, agent.description]);
     }, [selectableDesktopAgents, agentSearchQuery]);
 
     const defaultAgentName = React.useMemo(() => {
@@ -1438,15 +1438,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         if (!uiAgentName) {
             const buildAgent = primaryAgents.find(agent => agent.name === 'build');
             const defaultAgent = buildAgent || primaryAgents[0];
-            return defaultAgent ? capitalizeAgentName(defaultAgent.name) : t('chat.modelControls.selectAgent');
+            return defaultAgent ? agentLabel(defaultAgent) : t('chat.modelControls.selectAgent');
         }
         const agent = agents.find(a => a.name === uiAgentName);
-        return agent ? capitalizeAgentName(agent.name) : capitalizeAgentName(uiAgentName);
+        return agent ? agentLabel(agent) : agentLabel({ name: uiAgentName, displayName: '' });
     };
 
-    const capitalizeAgentName = (name: string) => {
-        return name.charAt(0).toUpperCase() + name.slice(1);
-    };
 
     const toggleMobileProviderExpansion = React.useCallback((providerId: string) => {
         setExpandedMobileProviders((prev) => {
@@ -1602,7 +1599,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             <MobileOverlayPanel
                 open={true}
                 onClose={closeMobileTooltip}
-                title={capitalizeAgentName(currentAgent.name)}
+                title={agentLabel(currentAgent)}
             >
                 <div className="flex flex-col gap-1.5">
                     {}
@@ -2215,7 +2212,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                         className="typography-ui-label font-semibold"
                                         style={isSelected ? { color: `var(${agentColor.var})` } : undefined}
                                     >
-                                        {capitalizeAgentName(agent.name)}
+                                        {agentLabel(agent)}
                                     </span>
                                     {isSelected && (
                                         <Icon name="check" className="size-4 text-primary ml-auto flex-shrink-0" />
@@ -2525,7 +2522,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 providers={providers}
                                 favoriteModels={favoriteModelsList}
                                 recentModels={recentModelsList}
-                                modelsMetadata={useConfigStore.getState().modelsMetadata}
                                 searchQuery={desktopModelQuery}
                                 onSearchQueryChange={setDesktopModelQuery}
                                 onSelect={handleSharedModelSelect}
@@ -2659,7 +2655,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 <div className="flex min-w-[200px] flex-col gap-2.5">
                     <div className="flex flex-col gap-0.5">
                         <span className="typography-micro font-semibold text-foreground">
-                            {capitalizeAgentName(currentAgent.name)}
+                            {agentLabel(currentAgent)}
                         </span>
                         {currentAgent.description && (
                             <span className="typography-meta text-muted-foreground">{currentAgent.description}</span>
@@ -2952,7 +2948,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                                                 'h-1 w-1 rounded-full agent-dot',
                                                                 getAgentColor(agent.name).class
                                                             )} />
-                                                            <span className="font-medium">{capitalizeAgentName(agent.name)}</span>
+                                                            <span className="font-medium">{agentLabel(agent)}</span>
                                                         </div>
                                                     </DropdownMenuItem>
                                                 </AgentDescriptionTooltip>

@@ -72,9 +72,9 @@ import { unsupportedAppSpecificOpenError, validateLocalPath } from './path-open-
 import { shouldAllowBrowserPanelCertificateError } from './browser-panel-security.mjs';
 import { createRelayDevTunnelBridge } from './relay-dev-tunnel.mjs';
 import { attachRendererRecovery } from './renderer-recovery.mjs';
-import { mintOutsideFileGrant } from '@openchamber/web/server/lib/fs/routes.js';
-import { fetchUpdateNotes } from '@openchamber/web/server/lib/changelog/update-notes.js';
-import { applyConnectAttemptTimeout } from '@openchamber/web/server/lib/network-defaults.js';
+import { mintOutsideFileGrant } from '@vantran-se/openchamber-web/server/lib/fs/routes.js';
+import { fetchUpdateNotes } from '@vantran-se/openchamber-web/server/lib/changelog/update-notes.js';
+import { applyConnectAttemptTimeout } from '@vantran-se/openchamber-web/server/lib/network-defaults.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1200,8 +1200,8 @@ const mapUpdaterProgressEvent = (payload) => ({
   data: payload.data,
 });
 
-import { pathLooksUserConfigured, mergePathValues } from '@openchamber/web/server/lib/opencode/path-utils.js';
-import { provideLoginShellEnvSnapshot } from '@openchamber/web/server/lib/opencode/login-shell-env.js';
+import { pathLooksUserConfigured, mergePathValues } from '@vantran-se/openchamber-web/server/lib/opencode/path-utils.js';
+import { provideLoginShellEnvSnapshot } from '@vantran-se/openchamber-web/server/lib/opencode/login-shell-env.js';
 
 // Merge the user's login-shell env (PATH, etc.) into this process before we
 // import/start the server in-process. The server and its children (opencode
@@ -1302,7 +1302,7 @@ const spawnLocalServer = async () => {
   process.env.NO_PROXY = process.env.NO_PROXY || 'localhost,127.0.0.1';
   process.env.no_proxy = process.env.no_proxy || 'localhost,127.0.0.1';
 
-  const { startWebUiServer } = await import('@openchamber/web/server/index.js');
+  const { startWebUiServer } = await import('@vantran-se/openchamber-web/server/index.js');
 
   const handle = await startWebUiServer({
     port: chosenPort,
@@ -1312,7 +1312,7 @@ const spawnLocalServer = async () => {
     exitOnShutdown: false,
     apiOnly: false,
     builtInExtensionsDir: app.isPackaged
-      ? path.join(app.getAppPath().endsWith('.asar') ? `${app.getAppPath()}.unpacked` : app.getAppPath(), 'node_modules/@openchamber/web/server/built-in-extensions')
+      ? path.join(app.getAppPath().endsWith('.asar') ? `${app.getAppPath()}.unpacked` : app.getAppPath(), 'node_modules/@vantran-se/openchamber-web/server/built-in-extensions')
       : undefined,
     onDesktopNotification: (payload) => maybeShowNativeNotification(payload),
     getIsWindowFocused: isAnyWindowFocused,
@@ -3474,7 +3474,7 @@ let devTunnelClientPromise = null;
 const relayDevTunnelBridge = createRelayDevTunnelBridge({ createMessageChannel: () => new MessageChannelMain(), logger: log });
 const getDevTunnelClient = async () => {
   if (!devTunnelClientPromise) {
-    devTunnelClientPromise = import('@openchamber/web/server/lib/dev-tunnel/client.js')
+    devTunnelClientPromise = import('@vantran-se/openchamber-web/server/lib/dev-tunnel/client.js')
       .then(({ createDevTunnelClient }) => createDevTunnelClient({ logger: log }))
       .catch((error) => {
         devTunnelClientPromise = null;

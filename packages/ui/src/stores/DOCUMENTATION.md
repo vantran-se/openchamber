@@ -397,7 +397,9 @@ These rules are important. Breaking them tends to reintroduce idle CPU churn, st
 ### Configuration stores and the Settings directory
 
 `useAgentsStore`, `useCommandsStore`, `useSkillsStore`, `useMcpConfigStore` and
-the provider half of `useConfigStore` describe **one project's configuration**.
+the provider half of `useConfigStore` describe directory-scoped configuration.
+Provider and agent catalogs use the actual worktree directory when selected;
+the parent project still supplies its OpenChamber project defaults.
 Two surfaces read them at once: the app (chat, autocompletes, pickers), which
 wants the active project, and Settings, whose own project selector may point
 somewhere else.
@@ -407,7 +409,22 @@ Each of them therefore keeps two things:
 - a per-directory map (`agentsByDirectory`, `commandsByDirectory`,
   `skillsByDirectory`, `serversByDirectory`, `directoryScoped`);
 - a flat mirror (`agents`, `commands`, `skills`, `mcpServers`, `providers`) that
-  tracks the **active** project only.
+  tracks the **active** directory only.
+
+A project whose OpenCode config OpenCode rejects (`ConfigInvalidError` and the
+other `Config*Error` names) is recorded in `useConfigStore.projectConfigErrors`,
+keyed by config directory, runtime-only. `loadAgents` stops retrying on it and a
+successful load clears it. `initializeApp` treats it as that project's failure,
+not the app's: startup completes so other projects stay reachable, and
+`ProjectConfigErrorToast` shows the file and message while that project is
+active.
+
+Any other failed `initializeApp` attempt records `lastInitFailure` (runtime-only,
+cleared on success and on runtime switch): which step failed —
+`serverUnreachable` (no answer or a gateway error), `openCodeUnavailable` (the
+server answered but OpenCode is not healthy), `loadAgents`, or `unexpected` —
+plus the error text when there is one. The startup recovery screen reads it, so
+only a real network failure tells the user to check that the server is running.
 
 #### What they hold: OpenCode 2 entity shapes
 

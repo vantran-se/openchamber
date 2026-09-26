@@ -53,6 +53,8 @@ import {
   applySessionEventsToGlobalSessions,
 } from "./session-event-router"
 import { shouldConsumeBulkArchiveEcho } from "./bulk-archive-echo"
+import { applyForkedSession, noteForkedSessionPatched } from "./forked-session"
+import { useBtwStore } from "@/stores/useBtwStore"
 import { selectNewChildSessions } from "./child-session-discovery"
 import { syncDebug } from "./debug"
 import { getReconnectCandidateSessionIds, mergeBootstrapSessions } from "./reconnect-recovery"
@@ -69,6 +71,8 @@ import {
 import { useConfigStore } from "@/stores/useConfigStore"
 import { refreshStoresForCatalogKind } from "@/stores/catalogRefresh"
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
+import { spaceIdOfDirectory } from "@/lib/spaces/space-route"
+import { useSpacesStore } from "@/lib/spaces/spaces-store"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
@@ -687,10 +691,17 @@ export function applySessionStatusSnapshot(
   store.setState((state: DirectoryStore) => {
     const current = state.session_status ?? {}
     let next: Record<string, SessionStatus> | undefined
+    let nextInvalidated: Record<string, true> | undefined
     const draft = () => (next ??= { ...current })
 
     for (const sessionId of candidateSessionIds) {
       const incoming = toSessionStatus(snapshot[sessionId])
+      if (mode === "authoritative" && state.sessionStatusInvalidated?.[sessionId]) {
+        // The successful snapshot supersedes the archive's discarded status.
+        nextInvalidated ??= { ...state.sessionStatusInvalidated }
+        delete nextInvalidated[sessionId]
+        changed = true
+      }
 
       if (incoming && incoming.type !== "idle") {
         // Confirm or raise active status (catches a busy event the SSE missed).
@@ -715,7 +726,11 @@ export function applySessionStatusSnapshot(
       }
     }
 
-    return next ? { session_status: next } : state
+    if (!next && !nextInvalidated) return state
+    const patch: Partial<DirectoryStore> = {}
+    if (next) patch.session_status = next
+    if (nextInvalidated) patch.sessionStatusInvalidated = nextInvalidated
+    return patch
   })
 
   return changed
@@ -728,11 +743,16 @@ async function resyncDirectorySessionStatuses(
   mode: StatusSnapshotMode,
   isStale?: () => boolean,
 ): Promise<DirectorySessionStatusSnapshot | null> {
-  const nextStatuses = await opencodeClient.getActiveSessionStatuses()
+  const invalidatedAtStart = store.getState().sessionStatusInvalidated
+  const nextStatuses = await opencodeClient.getActiveSessionStatuses(directory)
   // null = fetch failed; preserve existing state. {} or populated = a snapshot
   // of active sessions — reconciled per `mode` (absence ≠ idle under monotonic).
   if (nextStatuses === null || isStale?.()) return null
-  applySessionStatusSnapshot(store, nextStatuses, candidateSessionIds, mode)
+  const currentInvalidated = store.getState().sessionStatusInvalidated
+  const eligibleIds = candidateSessionIds.filter((id) => (
+    !currentInvalidated?.[id] || currentInvalidated === invalidatedAtStart
+  ))
+  applySessionStatusSnapshot(store, nextStatuses, eligibleIds, mode)
   if (mode === "authoritative") {
     store.setState({ sessionStatusReady: true })
     applyGlobalSessionStatusSnapshot(directory, nextStatuses, getDirectoryOwnedSessionIds(directory, store.getState().session))
@@ -1659,6 +1679,34 @@ export function handleEvent(
     return
   }
 
+  if (payload.type === "session.patched") {
+    noteForkedSessionPatched(payload.properties.sessionID)
+  }
+
+  if (payload.type === "session.forked") {
+    void applyForkedSession(
+      {
+        sessionID: payload.properties.sessionID,
+        parentID: payload.properties.parentID,
+        directory: directory && directory !== "global" ? directory : undefined,
+      },
+      {
+        isKnown: (sessionID) => useGlobalSessionsStore.getState().entityById.has(sessionID),
+        isCreatingLocally: (parentID) => useBtwStore.getState().byParent[parentID]?.creating === true,
+        getSession: (sessionID, sessionDirectory) => opencodeClient.getSession(sessionID, sessionDirectory),
+        isCurrent: () => expectedRuntimeKey === getRuntimeKey(),
+        apply: (info) => handleEvent(
+          rawDirectory,
+          { type: "session.created", properties: { info } },
+          childStores,
+          routingIndex,
+          expectedRuntimeKey,
+        ),
+      },
+    )
+    return
+  }
+
   if (payload.type === "session.deleted" && expectedRuntimeKey === getRuntimeKey()) {
     const sessionID = syncEventSessionID(payload)
     if (sessionID && directory && directory !== "global") {
@@ -2198,7 +2246,7 @@ export async function recoverInterruptedTurnAfterMessageLoad(
   if ((initial.permission?.[sessionID] ?? []).length > 0) return
 
   if (!initial.session_status?.[sessionID]) {
-    const snapshot = await opencodeClient.getActiveSessionStatuses()
+    const snapshot = await opencodeClient.getActiveSessionStatuses(directory)
     if (snapshot === null || isStale?.()
       || getRuntimeKey() !== runtimeKey || opencodeClient.getSdkClient() !== sdk) return
 
@@ -2553,6 +2601,19 @@ export function SyncProvider(props: {
         } finally {
           publishDirectoryEventBatch(batch)
         }
+      },
+      onSpaceStream: ({ spaceId, status }) => {
+        // A space's stream went: its sessions may be old until it answers again. Back: re-read
+        // that one space, the directories the global list knows for it, so a session made or
+        // finished during the gap shows up without a full global reload.
+        useSpacesStore.getState().noteStream(spaceId, status)
+        if (status !== "connected") return
+        const directories = Array.from(useGlobalSessionsStore.getState().sessionsByDirectory.keys())
+          .filter((directory) => spaceIdOfDirectory(directory) === spaceId)
+        const spaceDirectory = useSpacesStore.getState().spaces.get(spaceId)?.directory
+        if (spaceDirectory) directories.push(spaceDirectory)
+        if (directories.length === 0) return
+        void useGlobalSessionsStore.getState().refreshSessionsForDirectories(directories).catch(() => undefined)
       },
       onReconnect: ({ replayReset }) => {
         // Queue recovery is independent of the directory-bootstrap debounce.
@@ -3005,6 +3066,20 @@ export function useSessionStatus(sessionID: string, directory?: string) {
       if (state.session_status?.[sessionID] !== previous.session_status?.[sessionID]) notify()
     })
   }, [sessionID, store])
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
+/** Whether this directory has received a successful authoritative status snapshot. */
+export function useSessionStatusSnapshotReady(directory?: string, sessionID?: string): boolean {
+  const store = useDirectoryStore(directory)
+  const getSnapshot = useCallback(() => {
+    const state = store.getState()
+    return state.sessionStatusReady === true && (!sessionID || !state.sessionStatusInvalidated?.[sessionID])
+  }, [sessionID, store])
+  const subscribe = useCallback((notify: () => void) => store.subscribe((state, previous) => {
+    if (state.sessionStatusReady !== previous.sessionStatusReady
+      || (sessionID && state.sessionStatusInvalidated?.[sessionID] !== previous.sessionStatusInvalidated?.[sessionID])) notify()
+  }), [sessionID, store])
   return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 

@@ -6,7 +6,7 @@
  * both bundles import at runtime: the early window is handed from entry to
  * main through a slot in that module, and inlining it would give each bundle
  * its own copy. Small electron-* helper deps are inlined; everything else —
- * including the in-process web server (@openchamber/web) and native modules —
+ * including the in-process web server (@vantran-se/openchamber-web) and native modules —
  * stays external so it resolves from node_modules at runtime inside the
  * packaged app.
  *
@@ -14,7 +14,7 @@
  * a top-level `import { dlopen } from "bun:ffi"`. If we inline it here,
  * Node's ESM loader sees `bun:ffi` at package load time and crashes with
  * ERR_UNSUPPORTED_ESM_URL_SCHEME before any runtime guard can skip it.
- * Leaving @openchamber/web external means the conditional
+ * Leaving @vantran-se/openchamber-web external means the conditional
  * `if (isBunRuntime) await import('bun-pty')` stays dynamic and is never
  * reached under Electron.
  */
@@ -36,8 +36,8 @@ const result = await Bun.build({
   format: 'esm',
   external: [
     'electron',
-    '@openchamber/web',
-    '@openchamber/web/*',
+    '@vantran-se/openchamber-web',
+    '@vantran-se/openchamber-web/*',
     'bun-pty',
     'node-pty',
     './main.mjs',
