@@ -16,6 +16,7 @@ import { formatMessage, useI18nStore } from '@/lib/i18n/store';
 import { getUpdateInstallErrorMessage } from '@/lib/updateInstallError';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getClientPlatform, isCapacitorApp } from '@/lib/platform';
+import { browserRandomId } from '@/lib/browserRandomId';
 
 declare const __APP_VERSION__: string | undefined;
 
@@ -45,13 +46,14 @@ type ClientRuntime = 'desktop' | 'web' | 'vscode' | 'mobile';
 const CLIENT_INSTALL_ID_KEY = 'openchamber.update-install-id';
 
 function getClientInstallId(): string | undefined {
-  if (typeof window === 'undefined' || typeof crypto.randomUUID !== 'function') return undefined;
+  if (typeof window === 'undefined') return undefined;
 
   try {
     const existing = window.localStorage.getItem(CLIENT_INSTALL_ID_KEY)?.trim();
     if (existing) return existing;
 
-    const installId = crypto.randomUUID();
+    const installId = browserRandomId(globalThis.crypto);
+    if (!installId) return undefined;
     window.localStorage.setItem(CLIENT_INSTALL_ID_KEY, installId);
     return installId;
   } catch {
