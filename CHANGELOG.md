@@ -2,6 +2,12 @@
 
 <!-- Legacy copy for app versions up to 1.22.1, which fetch this file for their update notes. Generated from changelog/*.md while it exists; delete it after 2026-09-19 and nothing will recreate it. -->
 
+## [2.0.10] - 2026-09-28
+
+### Fixes
+
+- **Web:** OpenChamber starts normally in browsers that provide secure Web Crypto but do not implement `crypto.randomUUID`.
+
 ## [2.0.9] - 2026-09-28
 
 ### Improvements
