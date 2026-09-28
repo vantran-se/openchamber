@@ -2,6 +2,12 @@
 
 <!-- Legacy copy for app versions up to 1.22.1, which fetch this file for their update notes. Generated from changelog/*.md while it exists; delete it after 2026-09-19 and nothing will recreate it. -->
 
+## [2.0.9] - 2026-09-28
+
+### Improvements
+
+- **Web and OpenCode TUI:** Web now finds or starts OpenCode's shared local service, so both clients show the same sessions and live updates without server or port setup. Closing Web leaves OpenCode and TUI work running.
+
 ## [2.0.0] - 2026-09-23
 
 ### New
