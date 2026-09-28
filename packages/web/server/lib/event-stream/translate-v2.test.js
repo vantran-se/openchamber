@@ -50,6 +50,17 @@ describe('translateWireEvent', () => {
     });
   });
 
+  test('metadata updates carry the adoption marker as session.updated', () => {
+    const [event] = translateWireEvent(wire('session.metadata.updated', {
+      sessionID: 's1',
+      metadata: { openchamber: { adopted: true } },
+    }));
+    expect(event).toMatchObject({
+      type: 'session.updated',
+      properties: { info: { id: 's1', metadata: { openchamber: { adopted: true } } } },
+    });
+  });
+
   test('rename, move and usage all read as session.updated', () => {
     expect(translateWireEvent(wire('session.renamed', { sessionID: 's1', title: 'New' }))[0])
       .toMatchObject({ type: 'session.updated', properties: { info: { id: 's1', title: 'New' } } });

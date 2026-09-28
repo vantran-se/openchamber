@@ -82,7 +82,7 @@ describe('multi-run creation', () => {
     const result = await createMultiRunSession({ title: 'any title', directory: '/repo', identity: { ...identity, role } }, testApi.assertCurrent);
     expect(getMultiRunIdentity(result)).toMatchObject({ role, modelID: 'vendor/model' });
     expect(result.metadata?.external).toBe('preserve');
-    expect(result.metadata?.openchamber).toMatchObject({ goal: { status: 'active' }, reviewSessionID: 'review-id' });
+    expect(result.metadata?.openchamber).toMatchObject({ adopted: true, goal: { status: 'active' }, reviewSessionID: 'review-id' });
     expect(getMultiRunIdentity({ ...result, id: 'fork' })).toBeNull();
     expect(testApi.calls).toEqual(['create', 'metadata']);
   });

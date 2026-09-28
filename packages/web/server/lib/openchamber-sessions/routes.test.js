@@ -461,6 +461,7 @@ describe('openchamber session routes', () => {
     expect(response.body.promptDispatched).toBe(false);
     expect(sessionCreateMock).toHaveBeenCalledWith({
       location: { directory: '/repo/app' },
+      metadata: { openchamber: { adopted: true } },
       title: 'Side task',
     });
   });
@@ -935,7 +936,7 @@ describe('openchamber session routes', () => {
       .send({ directory: '/repo/app', prompt: 'Carry on', model: 'openai/gpt-5.5', agent: 'build' })
       .expect(200);
 
-    expect(sessionMetadataStore.entries.get('ses_fork')).toEqual({ openchamber: { assist: { recap: 'kept' } } });
+    expect(sessionMetadataStore.entries.get('ses_fork')).toEqual({ openchamber: { adopted: true, assist: { recap: 'kept' } } });
   });
 
   it('rejects send and fork requests without a prompt before calling OpenCode', async () => {

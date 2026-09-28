@@ -230,6 +230,7 @@ const applySessionSelection = async ({ client, sessionID, model, agent, variant 
 const createSession = async ({ client, directory, title }) => {
   const session = await client.session.create({
     location: { directory },
+    metadata: { openchamber: { adopted: true } },
     ...(title ? { title } : {}),
   });
   const sessionID = asNonEmptyString(session?.id);
@@ -901,6 +902,8 @@ export const createOpenChamberSessionService = (dependencies) => {
           writeMetadata: (sessionID, patch) => writeMetadata(sessionID, patch, directory),
         });
       }
+
+      await writeMetadata(targetSessionID, { openchamber: { adopted: true } }, directory);
 
       const baselineAssistantMessageId = await latestCompletedAssistantMessageID({
         client,

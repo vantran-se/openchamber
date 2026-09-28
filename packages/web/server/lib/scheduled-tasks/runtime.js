@@ -575,6 +575,7 @@ export const createScheduledTasksRuntime = (deps) => {
     const session = await client.session.create({
       title,
       location: { directory: projectPath },
+      metadata: { openchamber: { adopted: true } },
       model: {
         providerID: task.execution.providerID,
         id: task.execution.modelID,

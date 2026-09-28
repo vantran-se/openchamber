@@ -116,6 +116,9 @@ describe("issue #1637 — server omits directory, falls back to directoryOverrid
     expect(result?.id).toBe("ses_1637_a")
     expect(nextCreateSessionCalls).toHaveLength(1)
     expect(nextCreateSessionCalls[0].directory).toBe("/projects/alpha")
+    expect(nextCreateSessionCalls[0].params).toMatchObject({
+      metadata: { openchamber: { adopted: true } },
+    })
     expect(setCurrentSessionCalls).toHaveLength(1)
     expect(setCurrentSessionCalls[0]).toEqual({
       id: "ses_1637_a",

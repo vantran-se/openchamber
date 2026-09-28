@@ -67,7 +67,8 @@ describe('graceful shutdown runtime', () => {
     const runtime = createRuntime(server);
     await runtime.gracefulShutdown({ exitProcess: false });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    vi.advanceTimersByTime(1000);
+    await Promise.resolve();
 
     expect(warnSpy).not.toHaveBeenCalledWith('Server close timeout reached, forcing shutdown');
     expect(vi.getTimerCount()).toBe(0);

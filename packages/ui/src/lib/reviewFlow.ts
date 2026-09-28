@@ -15,7 +15,7 @@ import { useAutoReviewStore, type AutoReviewRun } from '@/stores/useAutoReviewSt
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { usePermissionStore } from '@/stores/permissionStore';
-import { optimisticSend, patchSessionMetadata, waitForConnectionOrThrow } from '@/sync/session-actions';
+import { adoptSessionForOpenChamber, optimisticSend, patchSessionMetadata, waitForConnectionOrThrow } from '@/sync/session-actions';
 import { useSelectionStore } from '@/sync/selection-store';
 import { resolveSendSelection, useSessionUIStore } from '@/sync/session-ui-store';
 import { getSyncMessages, getSyncParts, getSyncSessionStatus, getSyncSessions, registerSessionDirectory } from '@/sync/sync-refs';
@@ -366,6 +366,7 @@ const sendPlainMessage = async (
   expectedRuntimeKey?: string,
 ): Promise<string> => {
   assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey);
+  await adoptSessionForOpenChamber(sessionID, directory, expectedRuntimeKey);
   const resolved = modelContext ?? resolveModelContext(sessionID);
   if (!resolved) throw new Error('Select a model before sending review flow messages');
   const selection = useSelectionStore.getState();
@@ -445,13 +446,15 @@ const getReviewSessionTitle = (original: Session): string => {
 };
 
 // A review session runs tools too (reads other directories, verifies with commands),
-// so a fresh one starts with the same auto-accept choice as the session it reviews.
-// Failure only leaves the reviewer prompting for permissions the way it did before.
+// so a fresh one starts with the same permission mode as the session it reviews.
+// Failure only leaves the reviewer on the default mode the server gave it.
 const inheritPermissionAutoAccept = async (originalSessionID: string, reviewSessionID: string): Promise<void> => {
   const permissions = usePermissionStore.getState();
-  if (!permissions.isSessionAutoAccepting(originalSessionID)) return;
+  // `ask` is copied too: otherwise the server's default could make the
+  // reviewer more permissive than the session it reviews.
+  const mode = permissions.getSessionMode(originalSessionID);
   try {
-    await permissions.setSessionAutoAccept(reviewSessionID, true);
+    await permissions.setSessionMode(reviewSessionID, mode);
   } catch (error) {
     console.warn('[review-flow] failed to inherit permission auto-accept for review session', error);
   }
@@ -488,7 +491,7 @@ const createOrReuseReviewSession = async (
   // on them instead of being switched by the first prompt.
   const review = await opencodeClient.createSession({
     title: getReviewSessionTitle(original),
-    metadata: withReviewSessionMarker({}, originalSessionID),
+    metadata: withReviewSessionMarker({ openchamber: { adopted: true } }, originalSessionID),
     model: { providerID: selection.providerID, id: selection.modelID, variant: selection.variant },
     agent: selection.agent,
   }, directory);

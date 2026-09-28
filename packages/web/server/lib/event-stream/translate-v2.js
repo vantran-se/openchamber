@@ -128,6 +128,13 @@ export function translateWireEvent(payload) {
         info: compact({ id: sessionID, directory: directory || undefined, cost: data.cost, tokens: data.tokens, time: { updated: created } }),
       })];
 
+    case 'session.metadata.updated':
+      if (!sessionID) return [];
+      return [event('session.updated', {
+        sessionID,
+        info: compact({ id: sessionID, directory: directory || undefined, metadata: data.metadata, time: { updated: created } }),
+      })];
+
     case 'session.deleted':
       if (!sessionID) return [];
       return [event('session.deleted', { sessionID, info: { id: sessionID } })];

@@ -20,7 +20,7 @@ export async function createMultiRunSession(
     title: input.title,
     model: input.selection?.model,
     agent: input.selection?.agent,
-    metadata: withMultiRunMembership({}, membership),
+    metadata: withMultiRunMembership({ metadata: { openchamber: { adopted: true } } }, membership),
   }, input.directory);
   try {
     assertCurrent();

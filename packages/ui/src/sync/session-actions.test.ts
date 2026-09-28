@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test"
 import type { PermissionRequest } from "@/types/permission"
 import type { FormRequest } from "@/lib/opencode/model"
 import type { InputState } from "./input-store"
@@ -19,6 +19,8 @@ let sessionForkError: Error | null = null
 let beforeSessionForkResolve: (() => void) | null = null
 const selectedSessions: Array<{ sessionId: string | null; directoryHint?: string | null }> = []
 let beforeSessionDeleteResolve: ((sessionId: string) => void) | null = null
+// Lets a test switch runtime while a session read is in flight.
+let beforeSessionGetResolve: (() => void) | null = null
 const sessionMoveErrorsById = new Map<string, Error>()
 let globalHasLoaded = true
 const deletedChatDirectories: string[] = []
@@ -41,7 +43,7 @@ let unarchiveBatchResponse: MockRouteResponse = {
   body: { error: 'not found' },
 }
 let activeStatusSnapshot: Record<string, SessionStatus> | null = {}
-let readActiveStatusSnapshot = async () => activeStatusSnapshot
+let readActiveStatusSnapshot: (directory?: string | null) => Promise<Record<string, SessionStatus> | null> = async () => activeStatusSnapshot
 const deletedCleanupIdentities: Array<{ runtimeKey: string; directory: string; sessionId: string }> = []
 const movedSessionDirectories: Array<{ sessionID: string; directory: string }> = []
 const globalArchivedSessions: Session[] = []
@@ -54,9 +56,10 @@ mock.module("@/lib/opencode/client", () => ({
   ascendingId: (prefix: string) => `${prefix}_${(idCounter += 1).toString(16).padStart(12, "0")}`,
   opencodeClient: {
     getDirectory: () => "/test/project",
-    getActiveSessionStatuses: mock(() => readActiveStatusSnapshot()),
+    getActiveSessionStatuses: mock((directory?: string | null) => readActiveStatusSnapshot(directory)),
     getSession: mock(async (sessionId: string, directory?: string | null): Promise<Session> => {
       replyCalls.push({ method: "session.get", params: { sessionID: sessionId, directory } })
+      beforeSessionGetResolve?.()
       const record = sessionRecords.get(sessionId)
       if (!record) throw notFound("Session")
       return record
@@ -121,6 +124,7 @@ mock.module("@/lib/opencode/client", () => ({
       beforeSessionForkResolve?.()
       if (sessionForkError) throw sessionForkError
       if (!sessionForkResult) throw new Error("Missing fork session fixture")
+      sessionRecords.set(sessionForkResult.id, sessionForkResult)
       return sessionForkResult
     }),
     replyToPermission: mock(async (
@@ -271,6 +275,16 @@ mock.module("@/lib/runtime-fetch", () => ({
     const payload = JSON.parse(String(init?.body ?? "{}"))
     openchamberRouteRequests.push({ path, body: payload })
     beforeArchiveRouteResolve?.(path)
+    if (/\/api\/openchamber\/sessions\/[^/]+\/metadata$/.test(path)) {
+      const sessionId = path.split("/").at(-2) ?? ""
+      const record = sessionRecords.get(sessionId)
+      const metadata = payload.patch ?? record?.metadata ?? {}
+      if (record) sessionRecords.set(sessionId, { ...record, metadata })
+      return new Response(JSON.stringify({ metadata }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
     const answer = path.endsWith("/unarchive") ? unarchiveBatchResponse : archiveBatchResponse
     return new Response(JSON.stringify(answer.body), {
       status: answer.status,
@@ -1049,6 +1063,26 @@ describe("session restore (unarchive)", () => {
     expect(source.getState().session_status["session-a"]).toBeUndefined()
     expect(source.getState().sessionStatusInvalidated?.["session-a"]).toBe(true)
     expect(await unarchiveSession("session-a")).toBe(true)
+    expect(source.getState().session_status["session-a"]).toEqual({ type: "busy" })
+    expect(source.getState().sessionStatusInvalidated?.["session-a"]).toBeUndefined()
+  })
+
+  test("reads the owning space's status before settling a restored session", async () => {
+    const spaceDirectory = "/spaces/a1b2c3d4e5f6/app"
+    unarchiveBatchResponse = { status: 200, body: { restored: [restored("session-a", spaceDirectory)], failedIds: [] } }
+    const source = createStore({}, { sessionStatusReady: true, sessionStatusInvalidated: { "session-a": true } })
+    const statusReadDirectories: Array<string | null | undefined> = []
+    readActiveStatusSnapshot = async (directory): Promise<Record<string, SessionStatus>> => {
+      expect(source.getState().sessionStatusInvalidated?.["session-a"]).toBe(true)
+      expect(source.getState().session_status["session-a"]).toBeUndefined()
+      statusReadDirectories.push(directory)
+      return directory === spaceDirectory ? { "session-a": { type: "busy" } } : {}
+    }
+    const { unarchiveSession, setActionRefs } = await import("./session-actions")
+    setActionRefs(createChildStores([[spaceDirectory, source]]), () => "/test/project")
+
+    expect(await unarchiveSession("session-a")).toBe(true)
+    expect(statusReadDirectories).toEqual([spaceDirectory])
     expect(source.getState().session_status["session-a"]).toEqual({ type: "busy" })
     expect(source.getState().sessionStatusInvalidated?.["session-a"]).toBeUndefined()
   })
@@ -1838,10 +1872,11 @@ describe("forkFromMessage composer restore", () => {
 
       await forkFromMessage(sourceSession.id, "message-fork")
 
-      expect(replyCalls).toEqual([{
+      expect(replyCalls.some((call) => call.method === "session.fork" && call.params.sessionID === sourceSession.id)).toBe(true)
+      expect(replyCalls.find((call) => call.method === "session.fork")).toMatchObject({
         method: "session.fork",
         params: { sessionID: sourceSession.id, messageID: "message-fork", directory: sourceSession.directory },
-      }])
+      })
       expect(inputState.pendingComposerRestore).toEqual({
         target: { runtimeKey: "fork-runtime", directory, sessionId: forkedSession.id },
         text: "Replay this prompt",
@@ -1852,7 +1887,8 @@ describe("forkFromMessage composer restore", () => {
       expect(inputState.attachedFiles).toBe(sourceInput.attachedFiles)
       expect(inputState.attachedFiles).toHaveLength(1)
       expect(selectedSessions).toEqual([{ sessionId: forkedSession.id, directoryHint: directory }])
-      expect(source.getState().session).toEqual([sourceSession, sessionForkResult])
+      expect(source.getState().session[0]).toEqual(sourceSession)
+      expect(source.getState().session[1]).toMatchObject({ id: sessionForkResult.id, metadata: { openchamber: { adopted: true } } })
     })
   }
 
@@ -1940,10 +1976,11 @@ describe("forkFromMessage composer restore", () => {
 
     await forkFromMessage(sourceSession.id, "message-fork")
 
-    expect(replyCalls).toEqual([{
+    expect(replyCalls.some((call) => call.method === "session.fork" && call.params.sessionID === sourceSession.id)).toBe(true)
+      expect(replyCalls.find((call) => call.method === "session.fork")).toMatchObject({
       method: "session.fork",
       params: { sessionID: sourceSession.id, messageID: "message-fork", directory: sourceSession.directory },
-    }])
+    })
     expect(runtimeKey).toBe("other-runtime")
     expect(inputState).toEqual(sourceInput)
     expect(inputState.attachedFiles).toBe(sourceInput.attachedFiles)
@@ -1989,12 +2026,14 @@ describe("forkAfterMessage", () => {
 
     await forkAfterMessage(sourceSession.id, "msg-answer-1")
 
-    expect(replyCalls).toEqual([{
+    expect(replyCalls.some((call) => call.method === "session.fork" && call.params.sessionID === sourceSession.id)).toBe(true)
+      expect(replyCalls.find((call) => call.method === "session.fork")).toMatchObject({
       method: "session.fork",
       params: { sessionID: sourceSession.id, messageID: "msg-user-2", directory: sourceSession.directory },
-    }])
+    })
     expect(selectedSessions).toEqual([{ sessionId: forkedSession.id, directoryHint: sourceSession.directory }])
-    expect(source.getState().session).toEqual([sourceSession, forkedSession])
+    expect(source.getState().session[0]).toEqual(sourceSession)
+    expect(source.getState().session[1]).toMatchObject({ id: forkedSession.id, metadata: { openchamber: { adopted: true } } })
     expect(inputState.pendingComposerRestore).toBeNull()
   })
 
@@ -2005,10 +2044,11 @@ describe("forkAfterMessage", () => {
 
     await forkAfterMessage(sourceSession.id, "msg-answer-2")
 
-    expect(replyCalls).toEqual([{
+    expect(replyCalls.some((call) => call.method === "session.fork" && call.params.sessionID === sourceSession.id)).toBe(true)
+      expect(replyCalls.find((call) => call.method === "session.fork")).toMatchObject({
       method: "session.fork",
       params: { sessionID: sourceSession.id, messageID: undefined, directory: sourceSession.directory },
-    }])
+    })
   })
 
   test("refuses to fork from a message that is not loaded", async () => {
@@ -2063,10 +2103,11 @@ describe("forkFromLastCompletedTurn", () => {
 
     await forkFromLastCompletedTurn(sourceSession.id)
 
-    expect(replyCalls).toEqual([{
+    expect(replyCalls.some((call) => call.method === "session.fork" && call.params.sessionID === sourceSession.id)).toBe(true)
+      expect(replyCalls.find((call) => call.method === "session.fork")).toMatchObject({
       method: "session.fork",
       params: { sessionID: sourceSession.id, messageID: "u2", directory: sourceSession.directory },
-    }])
+    })
   })
 
   test("copies the whole transcript when the session is idle", async () => {
@@ -2214,6 +2255,41 @@ describe("revertToMessage passes session directory", () => {
       ["grandchild", "grandchild-user"],
       ["root", "root-cutoff"],
     ])
+  })
+
+  test("reverting a subagent run report reverts its child from the start and leaves the composer alone", async () => {
+    const earlier = { id: "root-context", sessionID: "root", role: "synthetic", time: { created: 5 }, text: "ctx" } as Message
+    const report = {
+      id: "root-report",
+      sessionID: "root",
+      role: "synthetic",
+      time: { created: 40 },
+      text: "done",
+      metadata: { source: "subagent", childID: "child", state: "completed" },
+    } as Message
+    const sessions = [
+      { ...sessionFixture("root"), directory: "/tree", time: { created: 1, updated: 1 } },
+      { ...sessionFixture("child"), parentID: "root", directory: "/tree", time: { created: 10, updated: 10 } },
+    ] as Session[]
+    const store = createStore({}, { session: sessions, message: { root: [earlier, report] } })
+    sessionMessageRecords.set("child", [
+      { info: { id: "child-prompt", sessionID: "child", role: "user", time: { created: 11 } } as Message, parts: [] },
+    ])
+    inputState.pendingInputText = "still typing"
+
+    const { setActionRefs, revertToMessage } = await import("./session-actions")
+    setActionRefs(createChildStores([["/tree", store]]), () => "/tree")
+
+    await revertToMessage("root", "root-report")
+
+    expect(replyCalls.filter((call) => call.method === "session.revert.stage").map((call) => [
+      call.params.sessionID,
+      call.params.messageID,
+    ])).toEqual([
+      ["child", "child-prompt"],
+      ["root", "root-report"],
+    ])
+    expect(inputState.pendingInputText).toBe("still typing")
   })
 
   test("continues reverting other descendants and the parent when one child fails", async () => {
@@ -2852,3 +2928,56 @@ describe("dismissOpenPermissionsForSession", () => {
     }
   })
 })
+
+describe("setSessionWorkState", () => {
+  const savedArchiveResponse = archiveBatchResponse
+
+  beforeEach(() => {
+    runtimeKey = "runtime-a"
+    openchamberRouteRequests.length = 0
+    globalUpsertedSessions.length = 0
+    beforeSessionGetResolve = null
+    beforeArchiveRouteResolve = null
+    sessionRecords.set("ses-work", { ...sessionFixture("ses-work"), metadata: {} })
+    archiveBatchResponse = { status: 200, body: { metadata: { openchamber: { work: { state: "open" } } } } }
+  })
+
+  afterEach(() => {
+    archiveBatchResponse = savedArchiveResponse
+    beforeSessionGetResolve = null
+    beforeArchiveRouteResolve = null
+  })
+
+  test("tracks the session through the metadata route", async () => {
+    const { setSessionWorkState } = await import("./session-actions")
+
+    const updated = await setSessionWorkState("ses-work", "/test/project", "open")
+
+    expect(updated?.metadata).toMatchObject({ openchamber: { work: { state: "open" } } })
+    const request = openchamberRouteRequests.find((entry) => entry.path.endsWith("/ses-work/metadata"))
+    expect(request?.body).toMatchObject({ patch: { openchamber: { work: { state: "open", openedBy: "user" } } } })
+  })
+
+  test("writes nothing to the new server when the runtime switches during the read", async () => {
+    const { setSessionWorkState } = await import("./session-actions")
+    beforeSessionGetResolve = () => {
+      runtimeKey = "runtime-b"
+    }
+
+    expect(await setSessionWorkState("ses-work", "/test/project", "done")).toBeNull()
+
+    expect(openchamberRouteRequests).toHaveLength(0)
+    expect(globalUpsertedSessions).toHaveLength(0)
+  })
+
+  test("keeps the old server's answer out of the new server's cache when the runtime switches during the write", async () => {
+    const { setSessionWorkState } = await import("./session-actions")
+    beforeArchiveRouteResolve = () => {
+      runtimeKey = "runtime-b"
+    }
+
+    expect(await setSessionWorkState("ses-work", "/test/project", "done")).toBeNull()
+
+    expect(globalUpsertedSessions).toHaveLength(0)
+  })
+});
