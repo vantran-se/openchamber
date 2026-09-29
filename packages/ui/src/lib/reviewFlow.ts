@@ -387,12 +387,13 @@ const sendPlainMessage = async (
     sessionId: sessionID,
     content: text,
     directory,
+    context: sendContext,
     onMessageID: (messageID) => {
       sentMessageID = messageID;
     },
     beforeOptimisticInsert: () => assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey),
     onOptimisticInsert: () => requestChatForceScrollBottom(sessionID),
-    send: (messageID) => {
+    send: (messageID, context) => {
       assertAutoReviewRuntimeStillCurrent(expectedRuntimeKey);
       // Only a genuine change travels with the prompt; the review session was
       // created on this selection, so normally nothing is switched.
@@ -404,7 +405,7 @@ const sendPlainMessage = async (
         model: selection.model,
         agent: selection.agent,
         text,
-        context: sendContext,
+        context,
         messageId: messageID,
       }).then(() => undefined);
     },

@@ -301,8 +301,9 @@ export async function routeMessage(params: {
     content: params.content,
     directory: requestDirectory,
     files: sendFiles,
+    context: contextItems,
     appendSubmissions: params.appendSubmissions,
-    send: (messageID) => opencodeClient.sendMessage({
+    send: (messageID, context) => opencodeClient.sendMessage({
       runtimeKey: params.runtimeKey,
       id: params.sessionId,
       providerID: params.providerID,
@@ -311,7 +312,7 @@ export async function routeMessage(params: {
       text: params.content,
       agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
       files: sendFiles,
-      context: contextItems.length > 0 ? contextItems : undefined,
+      context: context.length > 0 ? context : undefined,
       delivery: params.delivery,
       messageId: messageID,
       directory: requestDirectory,
