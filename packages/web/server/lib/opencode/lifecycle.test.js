@@ -109,7 +109,7 @@ const createRuntime = (overrides = {}, stateOverrides = {}, envOverrides = {}) =
     waitForReady: vi.fn(async () => true),
     normalizeApiPrefix: vi.fn(() => ''),
     applyOpencodeBinaryFromSettings: vi.fn(async () => null),
-    checkOpenCodeBinary: async () => '2.0.14',
+    checkOpenCodeBinary: async () => '2.0.19',
   ensureOpencodeCliEnv: vi.fn(),
     ensureLocalOpenCodeServerPassword: vi.fn(async () => 'password'),
     resolveManagedOpenCodeLaunchSpec: vi.fn((binary) => ({ binary, args: [], wrapperType: null })),
@@ -382,6 +382,9 @@ describe('OpenCode lifecycle', () => {
       for (const [, , options] of spawnMock.mock.calls) {
         expect(options.env).not.toHaveProperty('OPENCODE_BINARY');
       }
+      // Credential reads take variable keys from the environment the current process got.
+      expect(runtime.getManagedOpenCodeProcessEnv()).toBe(spawnMock.mock.calls[1][2].env);
+      expect(runtime.getManagedOpenCodeProcessEnv()).toMatchObject({ SHELL_ONLY: 'yes' });
     } finally {
       await runtime.testState.openCodeProcess.close();
     }
@@ -390,7 +393,7 @@ describe('OpenCode lifecycle', () => {
   it('records an authoritative ready terminal event for external startup', async () => {
     globalThis.fetch = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
+      json: async () => ({ version: '2.0.20', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     const runtime = createRuntime({
       env: {
@@ -422,7 +425,7 @@ describe('OpenCode lifecycle', () => {
   it('recovers an external OPENCODE_HOST connection using its configured endpoint', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
+      json: async () => ({ version: '2.0.20', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     globalThis.fetch = fetchMock;
     const runtime = createRuntime({}, {
@@ -437,6 +440,7 @@ describe('OpenCode lifecycle', () => {
 
     await runtime.restartOpenCode();
 
+    expect(runtime.getManagedOpenCodeProcessEnv()).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       'http://seamus:4095/api/info',
       expect.objectContaining({ method: 'GET' }),
@@ -499,7 +503,7 @@ describe('OpenCode lifecycle', () => {
   it('warms only the last-used directory after a successful bootstrap', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
-      json: async () => ({ version: '2.0.15', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
+      json: async () => ({ version: '2.0.20', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
     }));
     globalThis.fetch = fetchMock;
     const runtime = createRuntime({
@@ -922,6 +926,35 @@ describe('OpenCode lifecycle', () => {
     expect(server.signalCode).toBe('SIGTERM');
   });
 
+  it('removes AppImage launcher entries from the managed OpenCode launch env', async () => {
+    delete process.env.OPENCODE_BINARY;
+    const previous = { APPDIR: process.env.APPDIR, LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH };
+    process.env.APPDIR = '/tmp/.mount_OpenChAbC123';
+    process.env.LD_LIBRARY_PATH = '/tmp/.mount_OpenChAbC123/usr/lib:/opt/x:';
+    const child = createMockChild();
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+      });
+      return child;
+    });
+
+    try {
+      const runtime = createRuntime();
+      const server = await runtime.startOpenCode();
+      const [, , options] = spawnMock.mock.calls[0];
+
+      expect(options.env.LD_LIBRARY_PATH).toBe('/opt/x');
+
+      await server.close();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('strips AppImage ARGV0 from managed OpenCode launch env', async () => {
     delete process.env.OPENCODE_BINARY;
     const previousArgv0 = process.env.ARGV0;
@@ -1249,7 +1282,7 @@ it('shares the managed CLI preflight with desktop while startup is pending', asy
   await checking;
   const desktopVerdict = runtime.getManagedOpenCodePreflight();
   expect(runtime.testState.isOpenCodeReady).toBe(false);
-  finish('2.0.15');
+  finish('2.0.20');
   expect(await desktopVerdict).toBe(true);
   expect(checks).toBe(1);
   const server = await starting;

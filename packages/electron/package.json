@@ -1,13 +1,13 @@
 {
   "name": "@openchamber/electron",
-  "version": "2.0.10",
+  "version": "2.1.0",
   "private": true,
   "description": "Electron desktop runtime for OpenChamber",
   "author": "OpenChamber",
   "type": "module",
   "main": "./dist-bundle/entry.mjs",
   "opencodeCli": {
-    "version": "2.0.18"
+    "version": "2.0.21"
   },
   "dependencies": {
     "@vantran-se/openchamber-web": "workspace:*",
@@ -102,7 +102,7 @@
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "extendInfo": {
         "CFBundleIconName": "AppIcon",
-        "NSLocalNetworkUsageDescription": "OpenChamber connects to OpenCode servers on your local network."
+        "NSLocalNetworkUsageDescription": "OpenChamber needs access to devices and services on your local network."
       },
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
