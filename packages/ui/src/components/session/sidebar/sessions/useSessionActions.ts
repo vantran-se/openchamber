@@ -77,8 +77,11 @@ export const useSessionActions = (args: Args) => {
 
   React.useEffect(() => {
     return () => {
-      if (copyTimeout.current) {
-        clearTimeout(copyTimeout.current);
+      // The timeout is replaced by later copy actions, so cleanup must read the latest ref.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      const timeout = copyTimeout.current;
+      if (timeout) {
+        clearTimeout(timeout);
       }
     };
   }, []);

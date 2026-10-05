@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- test fixture exports helpers, not Fast Refresh components */
 import React, { act } from 'react';
 import { expect } from 'bun:test';
 import { Window } from 'happy-dom';
