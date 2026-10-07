@@ -110,6 +110,27 @@ describe('openchamber events', () => {
     expect(events).toEqual(['event-stream-ready', 'browser-control-request']);
   });
 
+  test('declares browser control on the stream only from a driving host', async () => {
+    const { subscribeOpenchamberEvents } = await import('./openchamberEvents');
+
+    const webUnsubscribe = subscribeOpenchamberEvents(() => undefined);
+    try {
+      expect(MockEventSource.instances).toHaveLength(1);
+      expect(MockEventSource.instances[0].url).not.toContain('browser=1');
+    } finally {
+      webUnsubscribe();
+    }
+
+    Object.assign(window, { __OPENCHAMBER_ELECTRON__: true });
+    const drivingUnsubscribe = subscribeOpenchamberEvents(() => undefined);
+    try {
+      expect(MockEventSource.instances).toHaveLength(2);
+      expect(MockEventSource.instances[1].url).toContain('browser=1');
+    } finally {
+      drivingUnsubscribe();
+    }
+  });
+
   test('dispatches externally created session events', async () => {
     const { subscribeOpenchamberEvents } = await import('./openchamberEvents');
     const events: unknown[] = [];
@@ -181,6 +202,44 @@ describe('openchamber events', () => {
     } finally {
       unsubscribe();
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('an expired session stops the stream from reconnecting until the user logs in', async () => {
+    const { useAuthSessionStore } = await import('./runtime-auth-expiry');
+    const { subscribeOpenchamberEvents } = await import('./openchamberEvents');
+    const unsubscribe = subscribeOpenchamberEvents(() => undefined);
+    try {
+      expect(MockEventSource.instances).toHaveLength(1);
+      useAuthSessionStore.getState().markExpired();
+      MockEventSource.instances[0].onerror?.();
+      // The first reconnect would come after one second.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(MockEventSource.instances).toHaveLength(1);
+
+      useAuthSessionStore.getState().markAuthenticated();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(MockEventSource.instances).toHaveLength(2);
+    } finally {
+      unsubscribe();
+      useAuthSessionStore.getState().markAuthenticated();
+    }
+  });
+
+  test('a stream left while waiting for the login does not reconnect after it', async () => {
+    const { useAuthSessionStore } = await import('./runtime-auth-expiry');
+    const { subscribeOpenchamberEvents } = await import('./openchamberEvents');
+    const unsubscribe = subscribeOpenchamberEvents(() => undefined);
+    try {
+      useAuthSessionStore.getState().markExpired();
+      MockEventSource.instances[0].onerror?.();
+      unsubscribe();
+      useAuthSessionStore.getState().markAuthenticated();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(MockEventSource.instances).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      useAuthSessionStore.getState().markAuthenticated();
     }
   });
 

@@ -14,7 +14,7 @@
 
 import React from 'react';
 
-import { isCapacitorApp } from '@/lib/platform';
+import { isCapacitorApp, isIPadDevice } from '@/lib/platform';
 import type { ComposerEditorHandle } from '../editor/ComposerEditor';
 import { getMobileComposerViewportMode, isComposerObscured } from './mobileViewportPolicy';
 import {
@@ -33,6 +33,10 @@ const isAndroidBrowser = (): boolean => /Android/i.test(navigator.userAgent);
 
 const isStandaloneBrowser = (): boolean =>
     window.matchMedia?.('(display-mode: standalone)')?.matches === true;
+
+// A wide iPad uses the desktop layout, so the normal mobile pin does not run.
+// Its Home Screen app still needs an explicit keyboard lift.
+const isIPadHomeScreenApp = (): boolean => isIPadDevice() && isStandaloneBrowser();
 
 export interface MobileViewportPinOptions {
     isMobile: boolean;
@@ -202,4 +206,59 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
             releaseForm(form);
         };
     }, [editorRef, formRef, isDraftScreen, isFocused, isFullscreen, isMobile]);
+
+    // A wide iPad Home Screen app does not enter the mobile layout above. Lift
+    // its normal chat composer by the exact overlap with the visual viewport.
+    React.useLayoutEffect(() => {
+        if (isCapacitorApp() || !isIPadHomeScreenApp()) return;
+        if (isMobile && (isFullscreen || isDraftScreen)) return;
+        const vv = window.visualViewport;
+        const form = formRef.current;
+        if (!vv || !form) return;
+
+        let lift = 0;
+        let frame = 0;
+        const setLift = (next: number) => {
+            if (next === lift) return;
+            lift = next;
+            form.style.top = next > 0 ? `${-next}px` : '';
+        };
+        const track = () => {
+            if (!form.contains(document.activeElement)) {
+                frame = 0;
+                setLift(0);
+                return;
+            }
+            const visibleBottom = Math.min(vv.offsetTop + vv.height, document.documentElement.clientHeight);
+            const rect = form.getBoundingClientRect();
+            const covered = Math.max(0, Math.ceil(rect.bottom + lift - visibleBottom));
+            const fits = rect.top + lift - covered >= vv.offsetTop;
+            setLift(fits ? covered : 0);
+            frame = requestAnimationFrame(track);
+        };
+
+        const onFocusIn = () => {
+            if (frame || !form.contains(document.activeElement)) return;
+            frame = requestAnimationFrame(track);
+        };
+        const onFocusOut = () => {
+            requestAnimationFrame(() => {
+                if (!form.contains(document.activeElement)) {
+                    cancelAnimationFrame(frame);
+                    frame = 0;
+                    setLift(0);
+                }
+            });
+        };
+        form.addEventListener('focusin', onFocusIn);
+        form.addEventListener('focusout', onFocusOut);
+        onFocusIn();
+
+        return () => {
+            form.removeEventListener('focusin', onFocusIn);
+            form.removeEventListener('focusout', onFocusOut);
+            cancelAnimationFrame(frame);
+            form.style.top = '';
+        };
+    }, [formRef, isDraftScreen, isFullscreen, isMobile]);
 }

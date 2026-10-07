@@ -16,18 +16,23 @@ import { usePermissionStore } from '@/stores/permissionStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useGitStore } from '@/stores/useGitStore';
+import { useGitIdentitiesStore } from '@/stores/useGitIdentitiesStore';
 import { useGitHubPrStatusStore } from '@/stores/useGitHubPrStatusStore';
+import { useSourceControlAuthStore } from '@/stores/useSourceControlAuthStore';
+import { repositoryBindingOwner } from '@/lib/source-control/repository-binding';
+import { useChangeRequestContextStore } from '@/stores/useChangeRequestContextStore';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useLinearAuthStore } from '@/stores/useLinearAuthStore';
-import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { useQuotaStore } from '@/stores/useQuotaStore';
 import { useMcpStore } from '@/stores/useMcpStore';
 import { useSkillsStore } from '@/stores/useSkillsStore';
 import { useCommandsStore } from '@/stores/useCommandsStore';
+import { useAgentsStore } from '@/stores/useAgentsStore';
 import { useAgentMemoryStore } from '@/stores/useAgentMemoryStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useFilesViewTabsStore } from '@/stores/useFilesViewTabsStore';
 import { useTerminalStore } from '@/stores/useTerminalStore';
+import { useWalkthroughStore } from '@/stores/useWalkthroughStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { resetStreamingState } from '@/sync/streaming';
 import { replaceGlobalSessionStatusById } from '@/sync/global-session-status';
@@ -83,6 +88,7 @@ export const resetAppForRuntimeEndpointChange = (detail: RuntimeEndpointChangedD
   useMultiRunStore.getState().resetForRuntimeSwitch();
   useSessionMultiSelectStore.getState().disable();
   useCommandsStore.getState().resetForRuntimeSwitch();
+  useAgentsStore.getState().resetForRuntimeSwitch();
   replaceGlobalSessionStatusById(new Map());
   resetGlobalBlockingRequests();
   resetBackgroundShells();
@@ -94,7 +100,12 @@ export const resetAppForRuntimeEndpointChange = (detail: RuntimeEndpointChangedD
   useMessageQueueStore.getState().resetForRuntimeSwitch(detail.previousRuntimeKey);
   useFileSearchStore.getState().resetForRuntimeSwitch();
   useGitStore.getState().resetForRuntimeSwitch(detail.runtimeKey);
+  useGitIdentitiesStore.getState().resetForRuntimeSwitch(detail.runtimeKey);
+  useSourceControlAuthStore.getState().resetForRuntimeSwitch();
+  repositoryBindingOwner.reset();
+  useChangeRequestContextStore.getState().resetForRuntimeSwitch();
   useGitHubPrStatusStore.getState().resetForRuntimeSwitch();
+  useWalkthroughStore.getState().reset();
   useSessionFoldersStore.getState().resetForRuntimeSwitch(detail.runtimeKey);
   useFilesViewTabsStore.getState().resetForRuntimeSwitch(detail.runtimeKey);
   // Guest rail icons are instance-owned. Keep the previous catalog and the
@@ -108,7 +119,7 @@ export const resetAppForRuntimeEndpointChange = (detail: RuntimeEndpointChangedD
   // its rail tab, its issue pickers, its work-status rows — against a runtime
   // that has no such integration. `App` re-asks once the new instance answers.
   useLinearAuthStore.getState().resetForRuntimeSwitch();
-  useGitHubAuthStore.getState().resetForRuntimeSwitch();
+  useSourceControlAuthStore.getState().resetForRuntimeSwitch();
   // Work-status readouts served from the instance: quotas, MCP servers, skills
   // and agent memory. All were cached globally or by directory alone, so they
   // reported the previous instance until something happened to refetch.
@@ -119,7 +130,7 @@ export const resetAppForRuntimeEndpointChange = (detail: RuntimeEndpointChangedD
   // The Linear team filter names a team in one workspace. Carried across, it
   // filters the new instance's issue list down to nothing.
   useUIStore.getState().applyLinearIssueListFiltersForRuntime();
-  useSessionUIStore.getState().restoreForRuntimeSwitch(detail.runtimeKey);
+  useSessionUIStore.getState().restoreForRuntimeSwitch(detail.runtimeKey, detail.previousRuntimeKey);
   useSessionUIStore.setState({ worktreeDiscoveryByProject: new Map() });
   useUIStore.getState().setOpenGuestPage(null);
   resetStreamingState();

@@ -15,14 +15,11 @@ Command modules implement user-facing commands and preserve output contracts acr
 
 - `commands-serve.js`
   - Implements `openchamber serve`.
-  - Owns OpenCode CLI checks, port resolution, log rotation, PID and instance registry writes, foreground or background server launch, startup summaries, and foreground shutdown behavior.
-  - Ordinary Web connects to OpenCode's shared local service. Startup failures use the existing output adapter so JSON remains JSON-only, quiet output stays concise, and non-TTY mode never prompts.
+  - Owns OpenCode CLI checks, port resolution, log rotation, PID/instance registry writes, foreground/background server launch, startup summaries, and foreground shutdown behavior.
 
 - `commands-lifecycle.js`
   - Implements `openchamber stop` and `openchamber restart`.
   - Owns lifecycle stop/restart semantics, desktop-managed port rejection, unmanaged instance shutdown attempts, PID/instance cleanup, and restart reuse of stored instance options.
-
-Stopping Web shuts down the selected OpenChamber instance but leaves a `shared-local` or `explicit-external` OpenCode service running. OpenCode process teardown belongs only to the Desktop `managed-owned` runtime.
 
 - `commands-status.js`
   - Implements `openchamber status`.
@@ -62,6 +59,7 @@ Stopping Web shuts down the selected OpenChamber instance but leaves a `shared-l
 - `commands-update.js`
   - Implements `openchamber update`.
   - Loads the package-manager helper, performs update flow, and coordinates restart behavior after updates.
+  - Installs the exact version returned by the update check and verifies the globally installed version after the package manager exits; a zero exit status without the target version is a loud failure, not a success report (#3083).
 
 - `commands-tunnel.js`
   - Implements `openchamber tunnel` and its subcommands: `profile`, `providers`, `ready`, `doctor`, `status`, `start`, `stop`, and `completion`.
@@ -74,6 +72,7 @@ These modules hold reusable, non-presentational logic for commands.
 
 - `cli-args.js`
   - Argument parsing, defaults, help text, completion script generation, and typo suggestions.
+  - `COMMAND_OWNED_FLAGS` lists flags only one family of commands reads (schedule, session, tunnel, logs). Such a flag on any other command is an `Unknown option for <command>` error in every output mode instead of being ignored; global and shared flags are not listed and stay accepted everywhere. Add a new command-specific flag there.
 
 - `cli-errors.js`
   - CLI exit codes and typed tunnel CLI errors.
@@ -127,7 +126,7 @@ These modules hold reusable, non-presentational logic for commands.
 
 - `cli-startup.js`
   - Native startup service detection, install/uninstall/status helpers, and platform-specific startup command execution.
-  - Installed startup services remain owned by their platform service manager. `startup start|stop|restart` controls that manager directly. Top-level lifecycle commands route the service's configured port through the same manager, and `update` restarts it after package installation instead of starting a duplicate daemon.
+  - The service runs the CLI by its resolved path. A pnpm global install resolves into a versioned `.pnpm` store directory that an update leaves behind, so the entrypoint is mapped back to the stable `node_modules/@openchamber/web` link when it exists.
 
 - `cli-tunnel-profiles.js`
   - Tunnel profile normalization, token resolution/redaction, profile storage, migration, file-permission warnings, and managed-remote pair persistence.

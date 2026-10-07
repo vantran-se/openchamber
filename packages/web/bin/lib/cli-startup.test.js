@@ -1,37 +1,33 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { startupServicePort } from './cli-startup.js';
+import { buildSystemdUserService, stablePnpmEntrypoint } from './cli-startup.js';
 
-function withServiceFile(content, run) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-startup-test-'));
-  const servicePath = path.join(dir, 'service');
-  fs.writeFileSync(servicePath, content);
-  try {
-    return run(servicePath);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
+const join = (...parts) => path.join(...parts);
 
-describe('startup service metadata', () => {
-  it('reads the configured port from a systemd unit', () => {
-    withServiceFile('ExecStart="/node" "/openchamber" "serve" "--foreground" "--port" "3069"\n', (servicePath) => {
-      expect(startupServicePort(servicePath)).toBe(3069);
-    });
+describe('stablePnpmEntrypoint', () => {
+  const globalModules = join('/home/me', '.local', 'share', 'pnpm', 'global', '5', 'node_modules');
+  const storeEntry = join(globalModules, '.pnpm', '@openchamber+web@2.1.0', 'node_modules', '@openchamber', 'web', 'bin', 'cli.js');
+  const stableEntry = join(globalModules, '@openchamber', 'web', 'bin', 'cli.js');
+
+  it('maps a pnpm store path to the version-independent link', () => {
+    expect(stablePnpmEntrypoint(storeEntry, (candidate) => candidate === stableEntry)).toBe(stableEntry);
   });
 
-  it('reads the configured port from a launchd plist', () => {
-    withServiceFile('<string>--port</string>\n<string>3070</string>\n', (servicePath) => {
-      expect(startupServicePort(servicePath)).toBe(3070);
-    });
+  it('keeps the resolved path when the link is missing', () => {
+    expect(stablePnpmEntrypoint(storeEntry, () => false)).toBeNull();
   });
 
-  it('reads the configured port from the Windows startup wrapper', () => {
-    withServiceFile("& 'openchamber' 'serve' '--foreground' '--port' '3071'\n", (servicePath) => {
-      expect(startupServicePort(servicePath)).toBe(3071);
-    });
+  it('leaves npm installs alone', () => {
+    const npmEntry = join('/usr/local/lib', 'node_modules', '@openchamber', 'web', 'bin', 'cli.js');
+    expect(stablePnpmEntrypoint(npmEntry, () => true)).toBeNull();
+  });
+});
+
+describe('buildSystemdUserService', () => {
+  it('treats the graceful SIGTERM exit as a clean stop', () => {
+    const unit = buildSystemdUserService({ port: 3002 });
+    expect(unit).toContain('Restart=always');
+    expect(unit).toMatch(/^SuccessExitStatus=143$/m);
   });
 });

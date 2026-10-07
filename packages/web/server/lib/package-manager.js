@@ -7,15 +7,15 @@ import { fileURLToPath } from 'url';
 import { fetchUpdateNotes } from './changelog/update-notes.js';
 import { isEnterpriseMode } from './enterprise-mode.js';
 
+import { resolveNpmRegistryRequest } from './opencode/npm-registry-config.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2F')}`;
-const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
-const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
-const FORK_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
+const GITHUB_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
+const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases';
 let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
@@ -600,15 +600,6 @@ function resolvePackageManagerCommand(pm) {
   return pm;
 }
 
-function quoteCommand(command) {
-  if (!command) return command;
-  if (!/\s/.test(command)) return command;
-  if (process.platform === 'win32') {
-    return `"${command.replace(/"/g, '""')}"`;
-  }
-  return `'${command.replace(/'/g, "'\\''")}'`;
-}
-
 function isCommandAvailable(command) {
   try {
     const result = spawnSync(command, ['--version'], {
@@ -623,23 +614,23 @@ function isCommandAvailable(command) {
   }
 }
 
+function getGlobalListArgs(pm) {
+  switch (pm) {
+    case 'pnpm':
+      return ['list', '-g', '--depth=0', PACKAGE_NAME];
+    case 'yarn':
+      return ['global', 'list', '--depth=0'];
+    case 'bun':
+      return ['pm', 'ls', '-g'];
+    default:
+      return ['list', '-g', '--depth=0', PACKAGE_NAME];
+  }
+}
+
 function isPackageInstalledWith(pm) {
   try {
     const pmCommand = resolvePackageManagerCommand(pm);
-    let args;
-    switch (pm) {
-      case 'pnpm':
-        args = ['list', '-g', '--depth=0', PACKAGE_NAME];
-        break;
-      case 'yarn':
-        args = ['global', 'list', '--depth=0'];
-        break;
-      case 'bun':
-        args = ['pm', 'ls', '-g'];
-        break;
-      default:
-        args = ['list', '-g', '--depth=0', PACKAGE_NAME];
-    }
+    const args = getGlobalListArgs(pm);
 
     const result = spawnSync(pmCommand, args, {
       encoding: 'utf8',
@@ -655,35 +646,69 @@ function isPackageInstalledWith(pm) {
   }
 }
 
+// npm, bun and yarn print `name@version`; pnpm separates the name and the
+// version with whitespace. An optional `v` covers yarn listing formats.
+const GLOBAL_VERSION_PATTERN = /@vantran-se\/openchamber-web[@\s]+v?(\d[\w.+-]*)/;
+
 /**
- * Get the update command for the detected package manager
+ * Read the globally installed version of the package as reported by the
+ * package manager itself. Returns null when the listing cannot be read or
+ * parsed. The listing command may exit non-zero when the package is missing,
+ * so stdout is parsed regardless of the status.
  */
-export function getUpdateCommand(pm = detectPackageManager()) {
-  const pmCommand = quoteCommand(resolvePackageManagerCommand(pm));
-  switch (pm) {
-    case 'pnpm':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
-    case 'yarn':
-      return `${pmCommand} global add ${PACKAGE_NAME}@latest`;
-    case 'bun':
-      return `${pmCommand} add -g ${PACKAGE_NAME}@latest`;
-    default:
-      return `${pmCommand} install -g ${PACKAGE_NAME}@latest`;
+function getInstalledGlobalVersion(pm) {
+  try {
+    const pmCommand = resolvePackageManagerCommand(pm);
+    const result = spawnSync(pmCommand, getGlobalListArgs(pm), {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10000,
+      ...getSpawnSyncBaseOptions(),
+    });
+    return String(result.stdout || '').match(GLOBAL_VERSION_PATTERN)?.[1] || null;
+  } catch {
+    return null;
   }
 }
 
-function getUpdateInvocation(pm = detectPackageManager()) {
+/**
+ * Normalize a version string into an exact install target.
+ * Returns the plain version or null when the value is not a concrete version.
+ */
+function normalizeTargetVersion(value) {
+  const normalized = String(value ?? '').trim().replace(/^v/, '');
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized) ? normalized : null;
+}
+
+/**
+ * Get the update command for the detected package manager.
+ * When an exact target version is given, it is pinned in the spec instead of
+ * re-resolving the `latest` dist-tag at install time: the update check and the
+ * package manager see different metadata, and dist-tag resolution can lag the
+ * check behind a fresh release (stale packument cache, pnpm minimumReleaseAge).
+ */
+function getUpdateInvocation(pm = detectPackageManager(), options = {}) {
+  const targetVersion = normalizeTargetVersion(options.targetVersion);
+  if (options.targetVersion != null && !targetVersion) {
+    throw new Error(`Invalid target version for update: ${String(options.targetVersion)}`);
+  }
+  const packageSpec = `${PACKAGE_NAME}@${targetVersion || 'latest'}`;
   const command = resolvePackageManagerCommand(pm);
   switch (pm) {
     case 'pnpm':
-      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+      return { command, args: ['add', '-g', packageSpec] };
     case 'yarn':
-      return { command, args: ['global', 'add', `${PACKAGE_NAME}@latest`] };
+      return { command, args: ['global', 'add', packageSpec] };
     case 'bun':
-      return { command, args: ['add', '-g', `${PACKAGE_NAME}@latest`] };
+      return { command, args: ['add', '-g', packageSpec] };
     default:
-      return { command, args: ['install', '-g', `${PACKAGE_NAME}@latest`] };
+      return { command, args: ['install', '-g', packageSpec] };
   }
+}
+
+export function getUpdateCommand(pm = detectPackageManager(), options = {}) {
+  const invocation = getUpdateInvocation(pm, options);
+  return [invocation.command, ...invocation.args].join(' ');
 }
 
 /**
@@ -704,8 +729,9 @@ export function getCurrentVersion() {
  */
 async function getLatestVersion() {
   try {
-    const response = await fetch(NPM_REGISTRY_URL, {
-      headers: { Accept: 'application/json' },
+    const request = resolveNpmRegistryRequest(PACKAGE_NAME);
+    const response = await fetch(request.url, {
+      headers: { Accept: 'application/json', ...request.headers },
       signal: AbortSignal.timeout(10000),
     });
 
@@ -769,30 +795,14 @@ export async function checkForUpdates(options = {}) {
   if (currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
-      if (appType !== 'web') {
-        return {
-          ...remote,
-          packageManager: pm,
-          updateCommand: 'openchamber update',
-        };
+      if (remote.available && appType === 'web') {
+        const npmLatest = await getLatestVersion();
+        if (!npmLatest || compareVersions(npmLatest, remote.version) < 0) {
+          remote.available = false;
+        }
       }
-
-      const latestVersion = await getLatestVersion();
-      if (!latestVersion) {
-        return {
-          available: false,
-          currentVersion,
-          error: 'Unable to determine versions',
-        };
-      }
-
-      const available = compareVersions(latestVersion, currentVersion) > 0;
       return {
-        available,
-        version: latestVersion,
-        currentVersion,
-        body: available && remote.version === latestVersion ? remote.body : undefined,
-        releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
+        ...remote,
         packageManager: pm,
         updateCommand: 'openchamber update',
       };
@@ -824,7 +834,7 @@ export async function checkForUpdates(options = {}) {
     version: latestVersion,
     currentVersion,
     body: changelog,
-    releaseUrl: `${FORK_RELEASES_URL}/tag/v${latestVersion}`,
+    releaseUrl: `${GITHUB_RELEASES_URL}/tag/v${latestVersion}`,
     downloadUrl,
     packageManager: pm,
     // Show our CLI command, not raw package manager command
@@ -833,14 +843,17 @@ export async function checkForUpdates(options = {}) {
 }
 
 /**
- * Execute the update (used by CLI)
+ * Execute the update (used by CLI).
+ * When an exact target version is given, the globally installed version is
+ * read back after the package manager exits: a zero exit status alone is not
+ * proof the target landed (stale dist-tag resolution, pnpm release-age policy),
+ * and the caller must not report success without the version matching.
  */
 export function executeUpdate(pm = detectPackageManager(), options = {}) {
-  const command = getUpdateCommand(pm);
-  const invocation = getUpdateInvocation(pm);
+  const invocation = getUpdateInvocation(pm, { targetVersion: options.targetVersion });
   if (!options?.silent) {
     console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
-    console.log(`Running: ${command}`);
+    console.log(`Running: ${[invocation.command, ...invocation.args].join(' ')}`);
   }
 
   const result = spawnSync(invocation.command, invocation.args, {
@@ -848,8 +861,43 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     ...getSpawnSyncBaseOptions(),
   });
 
+  if (result.status !== 0) {
+    return {
+      success: false,
+      exitCode: result.status,
+      error: `Package manager exited with code ${result.status}`,
+    };
+  }
+
+  const targetVersion = normalizeTargetVersion(options.targetVersion);
+  if (!targetVersion) {
+    return {
+      success: true,
+      exitCode: result.status,
+      installedVersion: null,
+    };
+  }
+
+  const installedVersion = getInstalledGlobalVersion(pm);
+  if (!installedVersion) {
+    return {
+      success: false,
+      exitCode: result.status,
+      error: `Could not determine the globally installed ${PACKAGE_NAME} version after the update; not reporting success`,
+    };
+  }
+
+  if (compareVersions(installedVersion, targetVersion) !== 0) {
+    return {
+      success: false,
+      exitCode: result.status,
+      error: `Installed ${PACKAGE_NAME} version ${installedVersion} does not match target ${targetVersion}. The package manager may have resolved different metadata or filtered the release.`,
+    };
+  }
+
   return {
-    success: result.status === 0,
+    success: true,
     exitCode: result.status,
+    installedVersion,
   };
 }

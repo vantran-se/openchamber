@@ -161,15 +161,37 @@ function removeStartupEnvFile() {
   try { fs.unlinkSync(getStartupEnvFilePath()); } catch {}
 }
 
+const PNPM_STORE_SEGMENT = `${path.sep}.pnpm${path.sep}`;
+const PACKAGE_SEGMENT = `${path.sep}node_modules${path.sep}@openchamber${path.sep}web${path.sep}`;
+
+// pnpm keeps every installed version in its own store directory and links the
+// current one into node_modules. A startup service pointed at the store path
+// keeps launching the old version after an update, so prefer the link.
+function stablePnpmEntrypoint(resolved, exists = fs.existsSync) {
+  const storeIndex = resolved.indexOf(PNPM_STORE_SEGMENT);
+  if (storeIndex < 0) return null;
+  const packageIndex = resolved.indexOf(PACKAGE_SEGMENT, storeIndex);
+  if (packageIndex < 0) return null;
+  const stable = path.join(
+    resolved.slice(0, storeIndex),
+    '@openchamber',
+    'web',
+    resolved.slice(packageIndex + PACKAGE_SEGMENT.length),
+  );
+  return exists(stable) ? stable : null;
+}
+
 function resolveCliEntrypoint() {
   const entry = typeof process.argv[1] === 'string' && process.argv[1].trim().length > 0
     ? process.argv[1]
     : path.join(__dirname, 'cli.js');
+  let resolved;
   try {
-    return fs.realpathSync(entry);
+    resolved = fs.realpathSync(entry);
   } catch {
     return path.resolve(entry);
   }
+  return stablePnpmEntrypoint(resolved) ?? resolved;
 }
 
 function buildStartupArgs(options = {}) {
@@ -262,6 +284,8 @@ ExecStart="${systemdEscapeArg(process.execPath)}" ${args}
 WorkingDirectory=${systemdUnitPath(os.homedir())}
 Restart=always
 RestartSec=5
+# A graceful shutdown on SIGTERM exits 143; a stop is not a failure.
+SuccessExitStatus=143
 
 [Install]
 WantedBy=default.target
@@ -481,6 +505,8 @@ function controlStartupService(action) {
 const restartStartupService = () => controlStartupService('restart');
 
 export {
+  stablePnpmEntrypoint,
+  buildSystemdUserService,
   getStartupStatus,
   startupServicePort,
   enableStartupService,

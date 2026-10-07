@@ -86,7 +86,9 @@ import { ImageArtifact } from './files/previews/ImageArtifact';
 import { MediaArtifact } from './files/previews/MediaArtifact';
 import { TableArtifact } from './files/previews/TableArtifact';
 import { useMarkdownLocalAssets } from './files/previews/useMarkdownLocalAssets';
+import { useHtmlPreviewUrl } from './files/useHtmlPreviewUrl';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { useEnterpriseMode } from '@/stores/useEnterprisePolicyStore';
 import { buildCodeMirrorCommentWidgets, FilePreviewCommentMenu, normalizeLineRange, useInlineCommentController } from '@/components/comments';
 import { opencodeClient } from '@/lib/opencode/client';
 import { useDirectoryShowHidden } from '@/lib/directoryShowHidden';
@@ -98,7 +100,9 @@ import { Icon } from "@/components/icon/Icon";
 import { useMessageTTS } from '@/hooks/useMessageTTS';
 import { ensurePierreThemeRegistered } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';
-import { isBrowserClientRuntime, openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
+import { isBrowserClientRuntime, isDesktopLocalOriginActive, openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
+import { registerCloseTabTarget } from '@/lib/closeTabTarget';
+import { isFileMissingError } from '@/lib/api/files-errors';
 import { useOpenInAppsStore } from '@/stores/useOpenInAppsStore';
 import { useKeybind, useKeybinds } from '@/hooks/useKeybind';
 import { isEditableEventTarget } from '@/hooks/keyboard-shortcut-dom';
@@ -329,15 +333,6 @@ const isDirectoryReadError = (error: unknown): boolean => {
   return normalized.includes('is a directory') || normalized.includes('eisdir');
 };
 
-const isFileMissingError = (error: unknown): boolean => {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  const normalized = message.toLowerCase();
-  return normalized.includes('file not found')
-    || normalized.includes('enoent')
-    || normalized.includes('no such file')
-    || normalized.includes('does not exist');
-};
-
 const MAX_CONTENT_POLL_BYTES = 200_000;
 
 const getFileIcon = (filePath: string, extension?: string): React.ReactNode => {
@@ -507,6 +502,17 @@ const FileRow: React.FC<FileRowProps> = ({
       {canRevealPath && (
         <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onRevealPath(node.path); }}>
           <Icon name="folder-received" className="mr-2 size-4" /> {t(getRevealLabelKey())}
+        </Item>
+      )}
+      {/* The OS opens it with whatever app owns the type: Word for a .docx, Typora for a .md. */}
+      {!isDir && canRevealPath && isDesktopLocalOriginActive() && (
+        <Item onClick={(e: React.MouseEvent) => {
+          e.stopPropagation();
+          void openDesktopPath(node.path).then((opened) => {
+            if (!opened) toast.error(t('sidebarFilesTree.toast.operationFailed'));
+          });
+        }}>
+          <Icon name="external-link" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.openInDefaultApp')}
         </Item>
       )}
       {isDir && (canCreateFile || canCreateFolder || canUploadHere) && (
@@ -2506,6 +2512,18 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     }
   }, [getNextOpenFile, handleSelectFile, isDirty, isMobile, openFiles, removeOpenPath, root, selectedFile?.path, setSelectedPath]);
 
+  // While a file is open here, Cmd/Ctrl+W closes its tab (asking first when
+  // it has unsaved edits) instead of the whole window.
+  const handleCloseFileRef = React.useRef(handleCloseFile);
+  React.useEffect(() => {
+    handleCloseFileRef.current = handleCloseFile;
+  }, [handleCloseFile]);
+  const closeTargetPath = selectedFile?.path ?? null;
+  React.useEffect(() => {
+    if (!visible || !closeTargetPath) return;
+    return registerCloseTabTarget(() => handleCloseFileRef.current(closeTargetPath));
+  }, [closeTargetPath, visible]);
+
   const openPathSet = React.useMemo(() => new Set(openPaths), [openPaths]);
   const statusIndex = React.useMemo(() => buildFileTreeStatusIndex(treeEnabled ? gitStatus?.files ?? [] : []), [gitStatus?.files, treeEnabled]);
   const getFileStatus = React.useCallback((path: string): FileStatus | null => {
@@ -2647,12 +2665,16 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     ? matchedGuestFileEditor
     : null;
   const claimedByGuest = guestFileEditor !== null;
+  const enterpriseMode = useEnterpriseMode();
   const binaryCanvas = guestFileEditor?.editor.content === 'binary';
   binaryCanvasRef.current = binaryCanvas;
   const isMarkdown = !claimedByGuest && Boolean(selectedFile?.path && isMarkdownFile(selectedFile.path));
   const isJson = !claimedByGuest && Boolean(selectedFile?.path && isJsonFile(selectedFile.path));
   const isHtml = !claimedByGuest && Boolean(selectedFile?.path && isHtmlFile(selectedFile.path));
-  const isDrawio = !claimedByGuest && Boolean(selectedFile?.path && isDrawioFile(selectedFile.path));
+  // The draw.io editor is diagrams.net's own page in a frame, and the diagram
+  // is handed to it. Enterprise mode keeps file contents away from third
+  // parties, so there a .drawio file opens as its XML like any text file.
+  const isDrawio = !claimedByGuest && !enterpriseMode && Boolean(selectedFile?.path && isDrawioFile(selectedFile.path));
   const isMermaid = !claimedByGuest && Boolean(selectedFile?.path && isMermaidFile(selectedFile.path));
   const isTable = !claimedByGuest && Boolean(selectedFile?.path && isDelimitedTableFile(selectedFile.path));
   const hasCanvas = claimedByGuest;
@@ -3357,6 +3379,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   });
 
   const editorFontSize = useUIStore((state) => state.editorFontSize);
+  // The rendered preview follows the editor's font size, so zoom and the
+  // Editor Font Size setting resize both modes. At the default 13 px it
+  // renders at the old 14 px body and 12 px code.
+  // SAFETY: CSS custom properties are valid inline styles; React's type lists only standard ones.
+  const previewFontStyle = React.useMemo(() => ({
+    '--text-markdown': `${editorFontSize + 1}px`,
+    '--text-code': `${editorFontSize - 1}px`,
+  } as React.CSSProperties), [editorFontSize]);
 
   // Git change markers compare the open file with its HEAD version. The
   // server answers an empty original both for a new file and for one git does
@@ -3501,17 +3531,21 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     ? `${selectedFile.path}|${selectedFileReadOptions.allowOutsideWorkspace ? 'outside' : 'workspace'}|${fileContentRevision}`
     : '';
 
-  const htmlAssetAuthKey = selectedFile?.path && isHtml && htmlViewMode === 'preview' && !runtime.isVSCode
-    ? `${selectedFile.path}|${fileContentRevision}`
-    : '';
+  const htmlPreviewRequest = React.useMemo(
+    () => (selectedFile?.path && isHtml && htmlViewMode === 'preview' && !runtime.isVSCode
+      ? { path: selectedFile.path, directory: root || '', revision: String(fileContentRevision) }
+      : null),
+    [selectedFile?.path, isHtml, htmlViewMode, runtime.isVSCode, root, fileContentRevision],
+  );
 
   const assetAuthErrorFallback = t('filesView.error.readFileFailed');
-  const { readyKey: htmlAssetAuthReadyKey, nonce: htmlPreviewNonce } =
-    useAssetAuthRefresh(htmlAssetAuthKey, setFileError, assetAuthErrorFallback);
+  const htmlPreview = useHtmlPreviewUrl(htmlPreviewRequest, assetAuthErrorFallback);
+  React.useEffect(() => {
+    if (htmlPreview.status === 'error') setFileError(htmlPreview.message);
+    else if (htmlPreview.status === 'ready') setFileError(null);
+  }, [htmlPreview, setFileError]);
   const { readyKey: pdfAssetAuthReadyKey, nonce: pdfPreviewNonce } =
     useAssetAuthRefresh(pdfAssetAuthKey, setFileError, assetAuthErrorFallback);
-
-  const isHtmlAssetAuthLoading = Boolean(htmlAssetAuthKey && htmlAssetAuthReadyKey !== htmlAssetAuthKey);
   const isPdfAssetAuthLoading = Boolean(pdfAssetAuthKey && pdfAssetAuthReadyKey !== pdfAssetAuthKey);
 
   const imageSrc = selectedFile?.path && isSelectedImage
@@ -4682,13 +4716,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                     </div>
                   }
                 >
-                  <SimpleMarkdownRenderer
-                    content={fileContent}
-                    className="typography-markdown-body"
-                    stripFrontmatter
-                    enableFileReferences={false}
-                    allowRawHtml
-                  />
+                  <div style={previewFontStyle}>
+                    <SimpleMarkdownRenderer
+                      content={fileContent}
+                      className="typography-markdown-body"
+                      stripFrontmatter
+                      enableFileReferences={false}
+                      allowRawHtml
+                    />
+                  </div>
                 </ErrorBoundary>
               </div>
               {!isFullscreen && (
@@ -4701,25 +4737,22 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
               )}
             </div>
           ) : selectedFile && isHtml && htmlViewMode === 'preview' ? (
-            isHtmlAssetAuthLoading ? (
+            !runtime.isVSCode && htmlPreview.status === 'loading' ? (
               <div className="flex h-full items-center justify-center text-muted-foreground typography-ui-label">
                 {t('common.loading')}
               </div>
             ) : (
             <div className="h-full overflow-hidden">
+              {/* No allow-same-origin: the page is untrusted and must not run as the app. */}
               <iframe
-                key={htmlPreviewNonce}
-                src={!runtime.isVSCode && htmlAssetAuthReadyKey === htmlAssetAuthKey ? (() => {
-                  const encoded = selectedFile.path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
-                  return getRuntimeUrlResolver().authenticatedAsset(`/api/fs/serve${encoded.startsWith('/') ? encoded : `/${encoded}`}`);
-                })() : undefined}
+                src={htmlPreview.status === 'ready' ? htmlPreview.url : undefined}
                 srcDoc={runtime.isVSCode ? (() => {
                   const basePath = selectedFile.path.substring(0, selectedFile.path.lastIndexOf('/') + 1);
                   if (!basePath) return fileContent;
                   return fileContent.replace(/<head([^>]*)>/i, `<head$1><base href="${basePath}">`);
                 })() : undefined}
                 className="w-full h-full border-none"
-                sandbox="allow-scripts allow-same-origin allow-forms"
+                sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"
                 title={t('filesView.editor.htmlPreviewTitle')}
               />
             </div>
@@ -5071,13 +5104,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                   </div>
                 }
               >
-                <SimpleMarkdownRenderer
-                  content={fileContent}
-                  className="typography-markdown-body"
-                  stripFrontmatter
-                  enableFileReferences={false}
-                  allowRawHtml
-                />
+                <div style={previewFontStyle}>
+                  <SimpleMarkdownRenderer
+                    content={fileContent}
+                    className="typography-markdown-body"
+                    stripFrontmatter
+                    enableFileReferences={false}
+                    allowRawHtml
+                  />
+                </div>
               </ErrorBoundary>
             </div>
               <MarkdownPreviewSearch

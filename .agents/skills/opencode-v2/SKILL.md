@@ -33,6 +33,36 @@ the 2.x code, not from memory of 1.x.
   `<dataDir>/opencode.managed.json` (`OPENCODE_CONFIG`), so a settings change
   applies without a restart. Only the binary, port and external toggle restart.
 
+## Every directory-scoped read starts a location
+
+On 2.x a read through the location middleware builds that directory's
+location, and the build starts every configured local MCP server for it. The
+location then lives until an hour without session events. So each read names
+a directory, and only one the user is working in:
+
+- **Which routes:** agent, plugin, model, provider, integration, mcp, project,
+  form, permission request list, fs, command, skill, rpc, pty, shell,
+  reference, vcs, websearch, config, location (`protocol/src/api.ts` lists the
+  groups with `locationMiddleware`). Session routes resolve the session's own
+  location; `GET /api/session`, `/api/session/active` and `/api/credential`
+  are global and start nothing.
+- **How the directory travels:** the `x-opencode-directory` header,
+  percent-encoded, or a `location[directory]` query. A `?directory=` query is
+  ignored.
+- **A read without one** answers for OpenCode's own working directory, the
+  user's home for a managed OpenCode, and starts a fleet there. The UI reads
+  through `opencodeClient` with the current directory; server code with no
+  directory of its own uses the lifecycle's `getDefaultOpenCodeDirectory()`,
+  the last-used directory it warmed at startup.
+- **Fan-out is the failure:** a loop over every project, worktree or store
+  directory starts one fleet each. A refresh after a catalog event re-reads
+  only the directories the events named; they are already running.
+
+A report of processes multiplying, memory climbing with MCP servers enabled,
+or MCP servers starting in projects nobody opened: reproduce it with
+[references/mcp-spawn-probe.md](references/mcp-spawn-probe.md) before reading
+code.
+
 ## Workarounds for what 2.x cannot do
 
 Each exists because 2.x has no route for it. When a tag adds the route,
@@ -54,6 +84,36 @@ the workaround goes and the record comes from OpenCode.
 Open asks upstream (OpenCode Slack): declaring 500 bodies on session
 mutations. Dropped: an import route for missing 1.x
 sessions (the top-up workaround is enough). Check the newest tag before re-asking.
+
+## Behaviour to expect
+
+Verified against live 2.x servers; re-check on a newer tag before relying on a
+gap.
+
+- **A cold location's catalog is not authoritative.** The first provider/model
+  read for a directory not started yet answers an empty list, then a partial
+  one without plugin providers, and the full list about two seconds later,
+  announced by `provider.updated` / `model.updated` with that
+  `location.directory`. Recovery rides on those events (`markConfigCatalogStale`).
+- **Plugin providers exist only in the running OpenCode.** Nothing about them
+  reaches `opencode.json` or `auth.json`; `/api/provider` is the only view, and
+  it strips `options.fetch`, so nothing tells a directly callable provider from
+  one that only works through OpenCode. Without a zen login OpenCode sets
+  `options.apiKey = "public"` on zen and trims it to free models: those run on
+  OpenCode's infrastructure and are called only through OpenCode.
+- **A session whose directory was deleted** still reads, but location-scoped
+  requests answer 404 `LocationNotFoundError`. `STATUS_BY_TAG` does not map it
+  to 404 on purpose: `fetchPermission` reads 404 as "settled", which would let
+  auto-accept fail open. `POST /api/session/:id/move` works on such a session.
+- **A background shell has no clean cancel.** `shell.remove` kills the process
+  but hands the agent a `Shell.NotFoundError`, and agents relaunch the command,
+  so `stopBackgroundShell` posts a cancellation note to the agent first.
+- **`opencode run --agent X` uses the default model**, not the agent's: pass
+  `-m provider/model#variant` in batch runs.
+- **A scratch `opencode serve` started from the app's shell answers 401**:
+  the shell inherits the desktop's `OPENCODE_PASSWORD`, which wins over
+  `OPENCODE_SERVER_PASSWORD`. Start it with `env -u OPENCODE_PASSWORD` (Basic
+  auth user `opencode`).
 
 ## Sources of truth
 

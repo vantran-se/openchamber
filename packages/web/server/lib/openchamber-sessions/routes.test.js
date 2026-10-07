@@ -17,6 +17,8 @@ const getWorktreeBootstrapStatusMock = vi.fn(async () => ({
   error: null,
   updatedAt: Date.now(),
 }));
+const worktreeBootstrapStore = { read: vi.fn(), write: vi.fn(), remove: vi.fn() };
+const hydrateWorktreeCheckoutMock = vi.fn(async () => ({ status: 'not-needed', submodules: [], lfs: [] }));
 // `@opencode/client` unwraps single-record responses, so these mocks return
 // the record itself; only the paged/list endpoints keep a `{ data }` envelope.
 const sessionCreateMock = vi.fn(async () => ({ id: 'ses_123' }));
@@ -200,6 +202,8 @@ const createApp = (overrides = {}, options = {}) => {
     buildOpenCodeUrl: (route) => `http://opencode.test${route}`,
     getOpenCodeAuthHeaders: () => ({ Authorization: 'Bearer test' }),
     waitForOpenCodeReady: vi.fn(async () => undefined),
+    worktreeBootstrapStore,
+    hydrateWorktreeCheckout: hydrateWorktreeCheckoutMock,
     ...overrides,
   });
   return { app, calls, archiveStore, sessionMetadataStore, broadcastGlobalUiEvent };
@@ -213,6 +217,7 @@ describe('openchamber session routes', () => {
 
   beforeEach(() => {
     createWorktreeMock.mockClear();
+    hydrateWorktreeCheckoutMock.mockClear();
     getWorktreeBootstrapStatusMock.mockClear();
     getWorktreeBootstrapStatusMock.mockImplementation(async () => ({
       status: 'ready',
@@ -545,6 +550,74 @@ describe('openchamber session routes', () => {
     expect(sessionSwitchAgentMock).toHaveBeenCalledWith({ sessionID: 'ses_123', agent: 'build' });
   });
 
+  it('skips a model hidden in the picker when nothing names a model (#1801)', async () => {
+    useCatalog({
+      models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', variants: [] }, ...CATALOG_MODELS],
+    });
+    const hiddenModels = [{ providerID: 'opencode', modelID: 'big-pickle' }];
+    const { app } = createApp({
+      readSettingsFromDiskMigrated: async () => ({ hiddenModels, projects: [{ id: 'proj_1', path: '/repo/app' }] }),
+    });
+    const response = await request(app)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+    expect(response.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+
+    // A default the user chose stays, hidden or not.
+    const { app: configured } = createApp({
+      readSettingsFromDiskMigrated: async () => ({
+        defaultModel: 'opencode/big-pickle',
+        hiddenModels,
+        projects: [{ id: 'proj_1', path: '/repo/app' }],
+      }),
+    });
+    const configuredResponse = await request(configured)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+    expect(configuredResponse.body.model).toEqual({ providerID: 'opencode', modelID: 'big-pickle' });
+  });
+
+  it('starts on the model last picked in a chat when nothing names one (#1801)', async () => {
+    useCatalog({
+      models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', variants: [] }, ...CATALOG_MODELS],
+    });
+    const project = { projects: [{ id: 'proj_1', path: '/repo/app' }] };
+    const create = async (settings, routing = {}) => {
+      const { app } = createApp({ readSettingsFromDiskMigrated: async () => ({ ...project, ...settings }), ...routing });
+      const response = await request(app)
+        .post('/api/openchamber/sessions')
+        .send({ directory: '/repo/app', prompt: 'Run this' })
+        .expect(200);
+      return response.body.model;
+    };
+
+    expect(await create({ lastSelectedModel: 'anthropic/claude-sonnet-5' }))
+      .toEqual({ providerID: 'anthropic', modelID: 'claude-sonnet-5' });
+    // Kept through a catalog gap, like a saved default.
+    expect(await create({ lastSelectedModel: 'claude-code/opus' }))
+      .toEqual({ providerID: 'claude-code', modelID: 'opus' });
+    // A configured default outranks it.
+    expect(await create({ lastSelectedModel: 'anthropic/claude-sonnet-5', defaultModel: 'openai/gpt-5.5' }))
+      .toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+    // Hidden since it was picked: skipped.
+    expect(await create({
+      lastSelectedModel: 'anthropic/claude-sonnet-5',
+      hiddenModels: [{ providerID: 'anthropic', modelID: 'claude-sonnet-5' }],
+    })).toEqual({ providerID: 'opencode', modelID: 'big-pickle' });
+    // Auto on a server without routing, or with routing that cannot run it
+    // now: skipped instead of refusing the request.
+    expect(await create({ lastSelectedModel: 'openchamber/auto' }))
+      .toEqual({ providerID: 'opencode', modelID: 'big-pickle' });
+    const resolveAutoSelection = vi.fn(async () => ({ model: { providerID: 'openai', id: 'gpt-5.5' }, agent: 'build', decision: {} }));
+    expect(await create({ lastSelectedModel: 'openchamber/auto' }, { resolveAutoSelection, isAutoReady: async () => false }))
+      .toEqual({ providerID: 'opencode', modelID: 'big-pickle' });
+    expect(resolveAutoSelection).not.toHaveBeenCalled();
+    expect(await create({ lastSelectedModel: 'openchamber/auto' }, { resolveAutoSelection, isAutoReady: async () => true }))
+      .toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+  });
+
   it('resolves an Auto default through the routing hook before switching the session', async () => {
     useCatalog();
     const resolveAutoSelection = vi.fn(async () => ({
@@ -635,6 +708,33 @@ describe('openchamber session routes', () => {
     expect(sessionPromptMock).toHaveBeenCalledWith({ sessionID: 'ses_123', text: 'Run this' });
   });
 
+  it('rejects a successful HTML response instead of reporting the prompt as dispatched', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url) => {
+      if (String(url).endsWith('/prompt')) {
+        return new Response('<!doctype html><title>OpenChamber</title>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      throw new Error('Unexpected transport request');
+    });
+    sessionPromptMock.mockImplementationOnce(async () => {
+      const options = clientOptions.at(-1);
+      await options.fetch(`${options.baseUrl}/api/session/ses_123/prompt`, { method: 'POST', body: '{"text":"Run this"}' });
+    });
+    try {
+      const { app } = createApp();
+      await request(app)
+        .post('/api/openchamber/sessions')
+        .send({ directory: '/repo/app', prompt: 'Run this', model: 'openai/gpt-5.5' })
+        .expect(500);
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('creates goal metadata before dispatching the initial goal prompt', async () => {
     const createSessionGoal = vi.fn(async () => undefined);
     const { app } = createApp({ createSessionGoal });
@@ -687,6 +787,15 @@ describe('openchamber session routes', () => {
   });
 
   it('creates a worktree before creating a session', async () => {
+    createWorktreeMock.mockImplementationOnce(async (_directory, _input, options) => {
+      await options.hydrateCheckout({ directory: '/repo/worktrees/side-task', parentRemoteName: '' });
+      return {
+        head: 'abc123',
+        name: 'side-task',
+        branch: 'openchamber/side-task',
+        path: '/repo/worktrees/side-task',
+      };
+    });
     const { app } = createApp();
     const response = await request(app)
       .post('/api/openchamber/sessions')
@@ -705,7 +814,19 @@ describe('openchamber session routes', () => {
       branchName: 'openchamber/side-task',
       startRef: 'main',
       setUpstream: false,
+    }, {
+      bootstrapStore: worktreeBootstrapStore,
+      hydrateCheckout: expect.any(Function),
     });
+    expect(hydrateWorktreeCheckoutMock).toHaveBeenCalledWith({
+      directory: '/repo/worktrees/side-task',
+      parentDirectory: '/repo/app',
+      parentRemoteName: '',
+    });
+    expect(getWorktreeBootstrapStatusMock).toHaveBeenCalledWith(
+      '/repo/worktrees/side-task',
+      { bootstrapStore: worktreeBootstrapStore },
+    );
     expect(response.body.directory).toBe('/repo/worktrees/side-task');
     expect(response.body.worktree.path).toBe('/repo/worktrees/side-task');
     expect(sessionCreateMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -761,6 +882,29 @@ describe('openchamber session routes', () => {
       .expect(500, { error: 'Worktree bootstrap failed: branch already exists' });
 
     expect(sessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a missing bootstrap record as ready', async () => {
+    getWorktreeBootstrapStatusMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        status: 'failed',
+        phase: 'directory-created',
+        error: 'Bootstrap state is missing',
+        updatedAt: Date.now(),
+      });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ id: 'ses_123' }) }));
+    try {
+      const { app } = createApp();
+      await request(app)
+        .post('/api/openchamber/sessions')
+        .send({ directory: '/repo/app', worktree: { name: 'side-task' } })
+        .expect(500, { error: 'Worktree bootstrap failed: Bootstrap state is missing' });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('sends a goal prompt to an existing session after creating goal metadata', async () => {
@@ -1002,6 +1146,46 @@ describe('openchamber session routes', () => {
     });
   });
 
+  it('applies the config default model variant when the prompt omits a model', async () => {
+    useCatalog({
+      config: [{
+        type: 'document',
+        info: { model: { providerID: 'openai', model: 'gpt-5.5', variant: 'high' } },
+      }],
+    });
+    const { app } = createApp();
+    const response = await request(app)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+
+    expect(response.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+    expect(sessionSwitchModelMock).toHaveBeenCalledWith({
+      sessionID: 'ses_123',
+      model: { id: 'gpt-5.5', providerID: 'openai', variant: 'high' },
+    });
+  });
+
+  it('applies the config default model variant from the string spelling', async () => {
+    useCatalog({
+      config: [{
+        type: 'document',
+        info: { model: 'openai/gpt-5.5#high' },
+      }],
+    });
+    const { app } = createApp();
+    const response = await request(app)
+      .post('/api/openchamber/sessions')
+      .send({ directory: '/repo/app', prompt: 'Run this' })
+      .expect(200);
+
+    expect(response.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.5' });
+    expect(sessionSwitchModelMock).toHaveBeenCalledWith({
+      sessionID: 'ses_123',
+      model: { id: 'gpt-5.5', providerID: 'openai', variant: 'high' },
+    });
+  });
+
   it('rejects an unknown agent before creating a session or worktree', async () => {
     const { app } = createApp();
     await request(app)
@@ -1098,5 +1282,32 @@ describe('openchamber session service directory resolution', () => {
       .rejects.toMatchObject({ statusCode: 400, message: 'Directory not found' });
     const unreadable = await createService({ readSettingsFromDiskMigrated: async () => { throw new Error('settings unreadable'); } });
     await expect(unreadable.resolveDirectory({ projectId: 'proj_1' })).rejects.toThrow('settings unreadable');
+  });
+
+  it('rejects a slash command SDK failure without falling back to a prompt', async () => {
+    sessionCommandMock.mockClear();
+    sessionPromptMock.mockClear();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (url) => selectionInputResponse(url));
+    commandListMock.mockResolvedValue({ data: [{ name: 'review' }] });
+    sessionCommandMock.mockRejectedValueOnce(new Error('command rejected'));
+    globalThis.fetch = fetchMock;
+    try {
+      const { app } = createApp();
+      await request(app)
+        .post('/api/openchamber/sessions/ses_source/send')
+        .send({
+          directory: '/repo/app',
+          prompt: '/review fix this',
+          model: 'openai/gpt-5.5',
+          agent: 'build',
+        })
+        .expect(500);
+
+      expect(sessionCommandMock).toHaveBeenCalledTimes(1);
+      expect(sessionPromptMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

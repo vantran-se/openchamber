@@ -430,6 +430,83 @@ describe('runtime worktree topology', () => {
   });
 });
 
+describe('working directory across a runtime switch', () => {
+  const workOn = (directory) => {
+    useDirectoryStore.setState({ currentDirectory: directory, homeDirectory: '/Users/me', isHomeReady: true });
+    opencodeClient.setDirectory(directory);
+  };
+  const switchRuntime = (from, to) => {
+    useSessionUIStore.getState().prepareForRuntimeSwitch(from);
+    useSessionUIStore.getState().restoreForRuntimeSwitch(to, from);
+  };
+  const UNKNOWN = { currentDirectory: '/', homeDirectory: '/', isHomeReady: false };
+
+  test('a directory used on one host is not carried into a host that remembers nothing', () => {
+    workOn('/Users/me/switch-a');
+    switchRuntime('host:switch-a', 'host:switch-b');
+
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+    expect(opencodeClient.getDirectory()).toBeUndefined();
+
+    // Leaving the second host before it named its home records nothing for it,
+    // and the first host gets its own directory back.
+    switchRuntime('host:switch-b', 'host:switch-a');
+    expect(useDirectoryStore.getState().currentDirectory).toBe('/Users/me/switch-a');
+
+    switchRuntime('host:switch-a', 'host:switch-b');
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+  });
+
+  test('a host whose home lookup failed still keeps and returns its own directory', () => {
+    workOn('/home/f/project');
+    switchRuntime('host:switch-f', 'host:switch-g');
+    switchRuntime('host:switch-g', 'host:switch-f');
+    // Back on the first host, which no longer answers: the directory is
+    // restored, the home is not known.
+    useDirectoryStore.setState({ homeDirectory: '/', isHomeReady: false });
+    expect(useDirectoryStore.getState().currentDirectory).toBe('/home/f/project');
+
+    switchRuntime('host:switch-f', 'host:switch-h');
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+    expect(opencodeClient.getDirectory()).toBeUndefined();
+
+    switchRuntime('host:switch-h', 'host:switch-f');
+    expect(useDirectoryStore.getState().currentDirectory).toBe('/home/f/project');
+  });
+
+  test('a disconnect in between does not carry the directory to the next host', () => {
+    workOn('/Users/me/switch-c');
+    switchRuntime('host:switch-c', 'mobile-disconnected');
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+
+    switchRuntime('mobile-disconnected', 'host:switch-d');
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+
+    // Reconnecting to the host that was dropped brings its directory back.
+    switchRuntime('host:switch-d', 'mobile-disconnected');
+    switchRuntime('mobile-disconnected', 'host:switch-c');
+    expect(useDirectoryStore.getState().currentDirectory).toBe('/Users/me/switch-c');
+  });
+
+  test('the directory this window started with stays for the first host it connects to', () => {
+    // A cold launch that connects through a switch: no host was left behind.
+    workOn('/Users/me/boot-directory');
+    switchRuntime('mobile-disconnected', 'host:switch-e');
+
+    expect(useDirectoryStore.getState()).toMatchObject({ currentDirectory: '/Users/me/boot-directory', isHomeReady: true });
+  });
+
+  test('a credential change on the same host leaves the directory alone', () => {
+    workOn('/Users/me/same-host');
+    switchRuntime('host:switch-i', 'host:switch-i');
+    expect(useDirectoryStore.getState().currentDirectory).toBe('/Users/me/same-host');
+
+    useDirectoryStore.setState(UNKNOWN);
+    switchRuntime('host:switch-j', 'host:switch-j');
+    expect(useDirectoryStore.getState()).toMatchObject(UNKNOWN);
+  });
+});
+
 describe('openNewSessionDraft project binding', () => {
   const projectA = { id: 'proj-a', path: '/projects/alpha', label: 'Alpha' };
   const projectB = { id: 'proj-b', path: '/projects/beta', label: 'Beta' };
@@ -525,20 +602,234 @@ describe('openNewSessionDraft project binding', () => {
     expect(draft.directoryOverride).toBeNull();
   });
 
+  test('respects an explicit Chat target over a recorded project target', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+
+    useSessionUIStore.getState().openNewSessionDraft({ target: 'chat' });
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.target).toBe('chat');
+    expect(draft.selectedProjectId).toBeNull();
+    expect(draft.directoryOverride).toBeNull();
+  });
+
+  test('prefers a live directory that matches a project over the recorded project target', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+    useDirectoryStore.getState().setDirectory(projectB.path, { showOverlay: false });
+
+    useSessionUIStore.getState().openNewSessionDraft();
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.target).toBe('project');
+    expect(draft.selectedProjectId).toBe(projectB.id);
+    expect(draft.directoryOverride).toBe(projectB.path);
+  });
+
+  test('keeps an unmatched live directory as Chat and leaves the recorded project target untouched', async () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+
+    useSessionUIStore.getState().openNewSessionDraft();
+    await Bun.sleep(0);
+
+    const draft = useSessionUIStore.getState().newSessionDraft;
+    expect(draft.target).toBe('chat');
+    expect(draft.selectedProjectId).toBeNull();
+    expect(draft.directoryOverride).toBeNull();
+    expect(JSON.parse(getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY))).toEqual({
+      projectId: projectA.id,
+      directory: projectA.path,
+      target: 'project',
+    });
+  });
+
+  test('keeps a Chat draft directory and target after delayed stale-directory recovery', async () => {
+    const originalActivateDirectory = useConfigStore.getState().activateDirectory;
+    const activatedDirectories = [];
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+    useConfigStore.setState({
+      activateDirectory: async (directory) => {
+        activatedDirectories.push(directory ?? null);
+      },
+    });
+
+    try {
+      useSessionUIStore.getState().openNewSessionDraft({ target: 'chat' });
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: null,
+        directoryOverride: null,
+      });
+
+      activatedDirectories.length = 0;
+      await Bun.sleep(0);
+
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: null,
+        directoryOverride: null,
+      });
+      expect(JSON.parse(getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY))).toEqual({
+        projectId: null,
+        directory: null,
+        target: 'chat',
+      });
+      expect(activatedDirectories).toEqual([]);
+    } finally {
+      useConfigStore.setState({ activateDirectory: originalActivateDirectory });
+    }
+  });
+
+  test('keeps a Chat draft that replaces a project draft while stale-directory recovery is pending', async () => {
+    const originalGetDirectoryAvailability = opencodeClient.getDirectoryAvailability;
+    const originalActivateDirectory = useConfigStore.getState().activateDirectory;
+    const availabilityCalls = [];
+    const availabilityResolvers = [];
+    useConfigStore.setState({ activateDirectory: async () => {} });
+    opencodeClient.getDirectoryAvailability = (directory) => {
+      availabilityCalls.push(directory);
+      return new Promise((resolve) => {
+        availabilityResolvers.push(resolve);
+      });
+    };
+
+    try {
+      useSessionUIStore.getState().openNewSessionDraft({ directoryOverride: '/external/worktree' });
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'project',
+        directoryOverride: '/external/worktree',
+      });
+      expect(availabilityCalls).toEqual(['/external/worktree']);
+
+      // The draft flips to Chat while the availability probe is still pending,
+      // keeping the live directory recovery is probing. The earlier directory
+      // re-checks still match it, so only the post-await target re-check can
+      // stop recovery from rewriting this Chat draft as a repaired project.
+      const replacedDraft = useSessionUIStore.getState().newSessionDraft;
+      useSessionUIStore.setState({
+        newSessionDraft: {
+          ...replacedDraft,
+          draftId: replacedDraft.draftId + 1,
+          target: 'chat',
+          selectedProjectId: CHAT_DRAFT_PROJECT_ID,
+        },
+      });
+      const persistedTargetBeforeResolution = getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY);
+
+      availabilityResolvers[0]('missing');
+      await Bun.sleep(0);
+
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: CHAT_DRAFT_PROJECT_ID,
+        directoryOverride: '/external/worktree',
+      });
+      expect(getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY)).toBe(persistedTargetBeforeResolution);
+    } finally {
+      opencodeClient.getDirectoryAvailability = originalGetDirectoryAvailability;
+      useConfigStore.setState({ activateDirectory: originalActivateDirectory });
+    }
+  });
+
+  test('restores the recorded project target when no live directory is set', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+    useDirectoryStore.setState({ currentDirectory: '' });
+
+    useSessionUIStore.getState().openNewSessionDraft();
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.target).toBe('project');
+    expect(draft.selectedProjectId).toBe(projectA.id);
+    expect(draft.directoryOverride).toBe(projectA.path);
+  });
+
+  test('repairs a stale persisted project directory through recovery', async () => {
+    const originalGetDirectoryAvailability = opencodeClient.getDirectoryAvailability;
+    const originalActivateDirectory = useConfigStore.getState().activateDirectory;
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: '/deleted/worktree', target: 'project' }),
+    );
+    useDirectoryStore.setState({ currentDirectory: '' });
+    useConfigStore.setState({ activateDirectory: async () => {} });
+    opencodeClient.getDirectoryAvailability = async () => 'missing';
+
+    try {
+      useSessionUIStore.getState().openNewSessionDraft();
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'project',
+        selectedProjectId: projectA.id,
+        directoryOverride: '/deleted/worktree',
+      });
+
+      await Bun.sleep(0);
+
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'project',
+        selectedProjectId: projectA.id,
+        directoryOverride: projectA.path,
+      });
+    } finally {
+      opencodeClient.getDirectoryAvailability = originalGetDirectoryAvailability;
+      useConfigStore.setState({ activateDirectory: originalActivateDirectory });
+    }
+  });
+
+  test('leaves an automatic draft on the recorded project when the live directory is unmatched', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+
+    useSessionUIStore.getState().openNewSessionDraft({ automatic: true });
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.target).toBe('project');
+    expect(draft.selectedProjectId).toBeNull();
+    expect(draft.directoryOverride).toBe('/external/worktree');
+  });
+
   test('respects explicit directoryOverride over active project', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+
     useSessionUIStore.getState().openNewSessionDraft({ directoryOverride: '/projects/beta/src' });
     const draft = useSessionUIStore.getState().newSessionDraft;
 
     expect(draft.open).toBe(true);
+    expect(draft.target).toBe('project');
+    expect(draft.selectedProjectId).toBe(projectB.id);
     expect(draft.directoryOverride).toBe('/projects/beta/src');
   });
 
   test('respects explicit selectedProjectId over active project', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path, target: 'project' }),
+    );
+
     useSessionUIStore.getState().openNewSessionDraft({ selectedProjectId: projectB.id });
     const draft = useSessionUIStore.getState().newSessionDraft;
 
     expect(draft.open).toBe(true);
+    expect(draft.target).toBe('project');
     expect(draft.selectedProjectId).toBe(projectB.id);
+    expect(draft.directoryOverride).toBe(projectB.path);
   });
 
   test('reopens an implicit draft on the project the target selector was last set to', () => {

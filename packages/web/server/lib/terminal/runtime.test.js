@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 
 import { createTerminalRuntime } from './runtime.js';
@@ -378,6 +378,24 @@ describe('terminal runtime', () => {
     expect(server.listenerCount('upgrade')).toBe(0);
   });
 
+  it('gives the shell the directory variables from Settings without bringing back what it strips', async () => {
+    const applyToDirectory = vi.fn(async (_directory, env) => ({
+      ...env,
+      PROJECT_TOOL: 'from-project',
+      TERM: 'dumb',
+      NODE_CHANNEL_FD: '3',
+    }));
+    const harness = createHarness({ environmentRuntime: { applyToDirectory } });
+    try {
+      await harness.routes.post.get('/api/terminal/create')({ body: { sessionId: 'term-env', cwd: '/repo' } }, createResponse());
+      expect(applyToDirectory).toHaveBeenCalledWith('/repo', expect.objectContaining({ PATH: expect.any(String) }), { refresh: true });
+      const { env } = harness.processes[0].options;
+      expect(env.PROJECT_TOOL).toBe('from-project');
+      expect(env.TERM).toBe('xterm-256color');
+      expect(env).not.toHaveProperty('NODE_CHANNEL_FD');
+    } finally { await harness.runtime.shutdown(); }
+  });
+
   it('creates client-identified sessions and forwards bounded resize operations', async () => {
     const harness = createHarness();
     try {
@@ -715,6 +733,35 @@ describe('terminal runtime', () => {
       await harness.routes.delete.get('/api/terminal/:sessionId')({ params: { sessionId: 'term-1' } }, createResponse());
       expect(harness.processes[0].kills).toEqual(['SIGTERM', 'SIGKILL']);
     } finally { await harness.runtime.shutdown(); }
+  });
+
+  it('refuses a sandboxed page (Origin: null) even when the UI has no password', async () => {
+    const server = http.createServer();
+    const refused = [];
+    const runtime = createRuntime(server, {
+      rejectWebSocketUpgrade(socket, status) {
+        refused.push(status);
+        socket.write(`HTTP/1.1 ${status} Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        socket.destroy();
+      },
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const socketUrl = `ws://127.0.0.1:${server.address().port}/api/terminal/ws`;
+    const handshake = (headers) => new Promise((resolve) => {
+      const socket = new WebSocket(socketUrl, { headers });
+      socket.once('open', () => { socket.close(); resolve('open'); });
+      socket.once('unexpected-response', (_req, res) => resolve(res.statusCode));
+      socket.once('error', () => resolve('error'));
+    });
+    try {
+      expect(await handshake({ Origin: 'null' })).toBe(403);
+      expect(refused).toEqual([403]);
+      // Native clients send no Origin and keep working without a password.
+      expect(await handshake({})).toBe('open');
+    } finally {
+      await runtime.shutdown();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('runs snapshot-first attach, scoped I/O, replay, reconnect, and close over a real websocket', async () => {

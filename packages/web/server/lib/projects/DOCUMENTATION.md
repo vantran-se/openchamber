@@ -2,6 +2,14 @@
 
 ## Purpose
 
+Project directory activation and server-owned project config storage.
+`POST /api/openchamber/directory` validates a path, adds it to OpenChamber's
+project list if needed, and saves `activeProjectId` and `lastDirectory`.
+`{ create: true }` creates the directory before validation, including outside
+the previously active workspace. It does not restart OpenCode. If creation
+succeeds but validation or settings persistence fails, the directory remains;
+the route reports failure rather than removing files it may not own.
+
 Server-owned storage for a project's per-user config file,
 `~/.config/openchamber/projects/<projectId>.json`. The file holds two
 families of keys with different writers, and this module is the only place
@@ -13,6 +21,7 @@ that writes it:
 | `setup-worktree`, `setup-worktree-wait`, `projectActions`, `projectActionsPrimaryId`, `draftStarters`, `projectPath` | `project-setup.js` via `readProjectSetup` / `updateProjectSetup` on the same runtime | `GET/PUT /api/projects/:projectId/config` (`routes.js`) |
 
 Notes, todos, and plans moved out of this file to `packages/web/server/lib/project-context`.
+A project's environment variables and environment command are not in this file either: values can be secrets, so they live in `environment.json` (mode 0600, `packages/web/server/lib/environment`).
 
 A second, optional source is the team's shared file, `<repo>/.openchamber/project.json`
 (`version: 1`; `setupWorktree`, `setupWorktreeWait`, `projectActions`, `draftStarters`,
@@ -66,7 +75,7 @@ UI (`packages/ui/src/lib/sharedTrustConfirmation.ts`).
 - `project-id.js` — `createProjectIdFromPath` / `projectPathFromId`: the path-derived id (`path_<base64url>`) that names the file, and the checkout path back from it. The shared UI derives the same id (`packages/ui/src/lib/projectId.ts`); both sides must agree. `projectConfigFileStemOf`: the stem that names the file and the sibling folder for an id, see the file name invariant below.
 - `project-config.js` — `createProjectConfigRuntime`: raw read, atomic write, the cross-process file lock (Electron and a CLI `serve` can share one projects dir), scheduled-task normalization, and the project-setup read/update.
 - `project-setup.js` — sanitizers, the shared-file parser (`parseSharedProjectConfig`, `normalizePlansDir`), the merge (`mergeProjectSetup`), and the personal view for the setup keys. Mirrored in the VS Code extension host (`packages/vscode/src/project-setup.ts`), which owns the same file when the webview has no OpenChamber server; keep the two in sync.
-- `routes.js` — the setup routes. `/api/projects` is on the JSON-body allowlist in `opencode/core-routes.js`.
+- `routes.js` — directory activation and setup routes. `/api/openchamber/directory` and `/api/projects` are on the JSON-body allowlist in `opencode/core-routes.js`. Both register before the generic OpenCode proxy. Web, Electron, hosted mobile, and Capacitor use the server route. VS Code handles the directory route locally through `api:openchamber/directory` and keeps its existing manager-owned directory selection.
 
 ## Invariants
 

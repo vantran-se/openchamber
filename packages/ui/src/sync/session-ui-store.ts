@@ -26,7 +26,7 @@ import { useProjectsStore } from "@/stores/useProjectsStore"
 import { useSessionDisplayStore } from "@/stores/useSessionDisplayStore"
 import { fetchSessionKnowledge, reportSessionKnowledgeDelivered } from "@/lib/sessionKnowledgeApi"
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from "@/stores/useGlobalSessionsStore"
-import { useDirectoryStore } from "@/stores/useDirectoryStore"
+import { isDirectoryUnknown, useDirectoryStore } from "@/stores/useDirectoryStore"
 import { useSessionFoldersStore } from "@/stores/useSessionFoldersStore"
 import { selectCommandsForDirectory, useCommandsStore } from "@/stores/useCommandsStore"
 import { selectSkillsForDirectory, useSkillsStore } from "@/stores/useSkillsStore"
@@ -88,7 +88,7 @@ import { getViewportSessionMemory, useViewportStore, viewportSessionKey } from "
 import { useSessionWorktreeStore } from "./session-worktree-store"
 import { getAttachedSessionDirectory } from "./session-worktree-contract"
 import { setSessionOpener } from "./session-navigation"
-import { getRuntimeKey } from "@/lib/runtime-switch"
+import { getRuntimeKey, isTransientRuntimeKey } from "@/lib/runtime-switch"
 import { clearLastActiveSession, persistLastActiveSession, readLastActiveSession } from "./last-session-cache"
 import { persistWorktreeTopology, readPersistedWorktreeTopology } from "./worktree-topology-cache"
 import { rememberRuntimeLiveStatus } from "./runtime-live-memory"
@@ -449,7 +449,7 @@ export type SessionUIState = {
   ) => void
   clearMaterializedDraftSession: (sessionId: string) => void
   prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => void
-  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => void
+  restoreForRuntimeSwitch: (apiBaseUrl?: string | null, previousRuntimeKey?: string | null) => void
   openNewSessionDraft: (options?: Partial<NewSessionDraftState> & { automatic?: boolean }) => void
   prepareChatDraftDirectory: () => Promise<string | null>
   closeNewSessionDraft: () => void
@@ -459,7 +459,8 @@ export type SessionUIState = {
   setDraftProjectContextPin: (kind: "note" | "plan", id: string, pinned: boolean) => void
   acknowledgeSessionAbort: (sessionId: string) => void
   clearAbortPrompt: () => void
-  armAbortPrompt: (durationMs?: number) => number | null
+  /** Arms "press Esc again to stop" for `sessionId`, the selected session by default. */
+  armAbortPrompt: (durationMs?: number, sessionId?: string) => number | null
   clearError: () => void
   markSessionAsOpenChamberCreated: (sessionId: string) => void
   isOpenChamberCreatedSession: (sessionId: string) => boolean
@@ -908,6 +909,11 @@ const resolveCreatableDraftDirectory = async (
 }
 
 const recoverStaleDraftDirectory = async (openedDraft: NewSessionDraftState): Promise<void> => {
+  // A managed Chat deliberately has no project directory. Its live directory
+  // may still point at an unregistered external path, which is not a stale
+  // project target for this recovery to repair.
+  if (openedDraft.target !== "project") return
+
   const resolved = await resolveCreatableDraftDirectory(openedDraft, openedDraft.directoryOverride)
   if (resolved.status !== "ok") return
   const recovered = normalizePath(resolved.directory ?? null)
@@ -916,6 +922,7 @@ const recoverStaleDraftDirectory = async (openedDraft: NewSessionDraftState): Pr
 
   const currentDraft = useSessionUIStore.getState().newSessionDraft
   if (!currentDraft.open) return
+  if (currentDraft.target !== "project") return
   if (currentDraft.preserveDirectoryOverride === true) return
   if (currentDraft.pendingWorktreeRequestId) return
   if (normalizePath(currentDraft.directoryOverride) !== original) return
@@ -1276,7 +1283,12 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
   prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => {
     const key = runtimeMemoryKey(apiBaseUrl)
-    const directory = useDirectoryStore.getState().currentDirectory || null
+    // Not remembered: an unknown directory, which would pin the host to "/"
+    // when restored, and anything under a key that names no host.
+    const directoryState = useDirectoryStore.getState()
+    const directory = isTransientRuntimeKey(key) || isDirectoryUnknown(directoryState)
+      ? null
+      : directoryState.currentDirectory || null
     const currentSessionId = get().currentSessionId
     const directorySnapshot = directory ? getDirectoryState(directory) : null
     rememberRuntimeLiveStatus({
@@ -1295,7 +1307,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     })
   },
 
-  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => {
+  restoreForRuntimeSwitch: (apiBaseUrl?: string | null, previousRuntimeKey?: string | null) => {
     const key = runtimeMemoryKey(apiBaseUrl)
     const memory = runtimeSessionMemory.get(key)
     const restoredSessionId = memory?.sessionId ?? activeSessionByRuntime.get(key) ?? null
@@ -1305,6 +1317,12 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       ?? readPersistedWorktreeTopology(key)
     if (restoredDirectory) {
       useDirectoryStore.getState().setDirectory(restoredDirectory, { showOverlay: false })
+    } else if (previousRuntimeKey && previousRuntimeKey !== key && !isTransientRuntimeKey(previousRuntimeKey)) {
+      // Nothing is remembered here and the directory was in use on the host
+      // just left, so it is forgotten instead of carried over. Coming from no
+      // host (a cold launch that connects through a switch) the directory is
+      // the one this window started with and stays.
+      useDirectoryStore.getState().resetForRuntimeSwitch()
     }
     set({
       currentSessionId: restoredSessionId,
@@ -1361,18 +1379,32 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       : null
     const persistedProjectByDir = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, persistedTarget?.directory ?? null)
     const currentDirProject = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, currentDirectory)
+    // A user-initiated implicit open from an external path outside every
+    // project is a Chat for this draft: forcing the live path into a project
+    // draft is wrong, and the live location is not a target choice that should
+    // erase the project the user last picked. A managed chat scratch directory
+    // is not external; the recorded project still reopens from it.
+    const isImplicitExternalChatFallback = currentDirectory !== null
+      && !isChatDirectoryPath(currentDirectory)
+      && currentDirProject === null
+      && options?.automatic !== true
+      && options?.target === undefined
+      && options?.directoryOverride === undefined
+      && options?.selectedProjectId === undefined
     const persistedProject = persistedProjectById ?? persistedProjectByDir
 
     // Nothing explicit was asked for: reopen on the side the user last worked
     // on. Only a recorded project target that still resolves to an existing
     // project beats Chat — a project removed since must not open a draft
-    // pointing at a directory that is no longer registered.
+    // pointing at a directory that is no longer registered — and the live
+    // directory must not itself be an unregistered external path.
     const restoresProjectTarget = !isVSCodeRuntime()
       && !options?.target
       && options?.directoryOverride === undefined
       && options?.selectedProjectId === undefined
       && persistedTarget?.target === "project"
       && persistedProject !== null
+      && !isImplicitExternalChatFallback
 
     let target = isVSCodeRuntime() ? "project" : options?.target
     if (!target) {
@@ -1420,7 +1452,11 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       warmChatsRootDirectory()
     }
 
-    persistDraftTarget({ projectId: selectedProject?.id ?? null, directory, target })
+    // An unregistered live path falls back to managed Chat for this draft, but
+    // it is not a user choice that should discard the recorded project target.
+    if (!(target === "chat" && isImplicitExternalChatFallback)) {
+      persistDraftTarget({ projectId: selectedProject?.id ?? null, directory, target })
+    }
 
     const nextDraft: NewSessionDraftState = {
       draftId: nextDraftId++,
@@ -1617,11 +1653,11 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
   clearAbortPrompt: () => set({ abortPromptSessionId: null, abortPromptExpiresAt: null }),
 
-  armAbortPrompt: (durationMs = 5000) => {
-    const { currentSessionId } = get()
-    if (!currentSessionId) return null
+  armAbortPrompt: (durationMs = 5000, sessionId) => {
+    const target = sessionId ?? get().currentSessionId
+    if (!target) return null
     const expiresAt = Date.now() + durationMs
-    set({ abortPromptSessionId: currentSessionId, abortPromptExpiresAt: expiresAt })
+    set({ abortPromptSessionId: target, abortPromptExpiresAt: expiresAt })
     return expiresAt
   },
 

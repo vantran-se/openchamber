@@ -4,6 +4,7 @@ import {
   getWorktreeBootstrapStatus as getWorktreeBootstrapStatusDefault,
   resolvePrimaryWorktreeRoot,
 } from '../git/index.js';
+import { parseModelSelection } from '../opencode/config-v2.js';
 import { expandSnippets } from '../opencode/snippets.js';
 import { AUTO_MODEL_REF, isAutoModel } from '../routing/defaults.js';
 import { parseScheduledCommandPrompt } from '../scheduled-tasks/runtime.js';
@@ -90,12 +91,25 @@ const resolveVariant = (models, providerID, modelID, variant) => {
   return asList(model.variants).some((entry) => entry?.id === normalized) ? normalized : undefined;
 };
 
-// Config `model` is either "providerID/modelID" or the expanded object form.
-const parseConfigModel = (value) => {
-  if (typeof value === 'string') return splitModel(value);
-  const providerID = asNonEmptyString(value?.providerID);
-  const modelID = asNonEmptyString(value?.model);
-  return providerID && modelID ? { providerID, modelID } : null;
+const isModelHidden = (hiddenModels, providerID, modelID) => hiddenModels.some(
+  (hidden) => hidden?.providerID === providerID && hidden?.modelID === modelID,
+);
+
+// The pick when nothing is configured or remembered: Big Pickle, else the first
+// model. A model the user hid in the picker is skipped; configured defaults never
+// come through here, so they stay honoured even when hidden. With every model
+// hidden the session still needs one, so the unfiltered pick stands.
+const resolveFallbackModel = (models, hiddenModels) => {
+  const isVisible = (providerID, modelID) => !isModelHidden(hiddenModels, providerID, modelID);
+  const candidates = models.filter(
+    (entry) => asNonEmptyString(entry?.providerID) && asNonEmptyString(entry?.modelID),
+  );
+  const bigPickle = findCatalogModel(candidates, FALLBACK_PROVIDER_ID, FALLBACK_MODEL_ID);
+  const pick = (bigPickle && isVisible(bigPickle.providerID, bigPickle.modelID) ? bigPickle : null)
+    || candidates.find((entry) => isVisible(entry.providerID, entry.modelID))
+    || bigPickle
+    || candidates[0];
+  return pick ? { providerID: pick.providerID, modelID: pick.modelID } : null;
 };
 
 const resolveProjectDefaults = (settings, directory, projectId) => {
@@ -134,14 +148,16 @@ const fetchSelectionInputs = async ({ client, readSettingsFromDiskMigrated }) =>
     if (!info) continue;
     const agent = asNonEmptyString(info.default_agent);
     if (agent) opencodeDefaultAgent = agent;
-    const model = parseConfigModel(info.model);
+    // Config `model` is the v2 selection spelling: "provider/model#variant" or
+    // the expanded object form. The canonical parser folds both.
+    const model = parseModelSelection(info.model);
     if (model) opencodeDefaultModel = model;
   }
 
   return { settings, models, agents, opencodeDefaultAgent, opencodeDefaultModel };
 };
 
-const resolveDefaultSelection = ({ agents, models, settings, projectDefaults, opencodeDefaultAgent, opencodeDefaultModel }) => {
+const resolveDefaultSelection = ({ agents, models, settings, projectDefaults, opencodeDefaultAgent, opencodeDefaultModel, autoAvailable }) => {
   const primaryAgents = agents.filter((agent) => isPrimaryAgentMode(agent?.mode) && agent?.hidden !== true);
   let resolvedAgent = null;
   const projectDefaultAgent = asNonEmptyString(projectDefaults?.defaultAgent);
@@ -170,8 +186,11 @@ const resolveDefaultSelection = ({ agents, models, settings, projectDefaults, op
 
   let model = null;
   let variant;
-  const projectDefaultModel = parseConfigModel(projectDefaults?.defaultModel);
-  const settingsDefaultModel = parseConfigModel(settings?.defaultModel);
+  // Settings and project defaults store `provider/model` with the variant in
+  // its own field, so these two stay a plain split; the OpenCode config model
+  // can carry its variant and is parsed with the canonical parser.
+  const projectDefaultModel = splitModel(projectDefaults?.defaultModel);
+  const settingsDefaultModel = splitModel(settings?.defaultModel);
   // A saved choice is honoured even when the catalog has not listed it yet: a
   // discovery gap must not silently move the user onto another model.
   if (projectDefaultModel) {
@@ -191,19 +210,23 @@ const resolveDefaultSelection = ({ agents, models, settings, projectDefaults, op
   }
 
   if (!model && opencodeDefaultModel) {
-    model = opencodeDefaultModel;
+    model = { providerID: opencodeDefaultModel.providerID, modelID: opencodeDefaultModel.modelID };
+    variant = resolveVariant(models, model.providerID, model.modelID, opencodeDefaultModel.variant);
   }
 
-  if (!model && hasCatalogModel(models, FALLBACK_PROVIDER_ID, FALLBACK_MODEL_ID)) {
-    model = { providerID: FALLBACK_PROVIDER_ID, modelID: FALLBACK_MODEL_ID };
+  // The model last picked in a chat composer. Like a saved default it is kept
+  // through catalog gaps; a model hidden since, or Auto on a server without
+  // routing, is skipped.
+  const hiddenModels = asList(settings?.hiddenModels);
+  const lastSelectedModel = splitModel(settings?.lastSelectedModel);
+  if (!model
+    && lastSelectedModel
+    && !isModelHidden(hiddenModels, lastSelectedModel.providerID, lastSelectedModel.modelID)
+    && (autoAvailable || !isAutoModel(lastSelectedModel))) {
+    model = lastSelectedModel;
   }
 
-  if (!model) {
-    const first = models[0];
-    if (asNonEmptyString(first?.providerID) && asNonEmptyString(first?.modelID)) {
-      model = { providerID: first.providerID, modelID: first.modelID };
-    }
-  }
+  if (!model) model = resolveFallbackModel(models, hiddenModels);
 
   return {
     agent: resolvedAgent?.id,
@@ -268,6 +291,27 @@ const latestCompletedAssistantMessageID = async ({ client, sessionID }) => {
     if (!latest || (message.time.created || 0) >= (latest.time?.created || 0)) latest = message;
   }
   return asNonEmptyString(latest?.id);
+};
+
+/**
+ * The id of the newest `idle` record OpenCode appended to the session (it
+ * marks the end of a run), null when the session has none, or undefined when
+ * the history could not be read. A later delivery compares record ids, never
+ * clock times, so a remote OpenCode with a skewed clock still matches.
+ */
+const latestIdleRecordID = async ({ client, sessionID }) => {
+  let messages;
+  try {
+    messages = await listMessages({ client, sessionID, limit: 100 });
+  } catch {
+    return undefined;
+  }
+  let latest = null;
+  for (const message of messages) {
+    if (message?.type !== 'idle' || !asNonEmptyString(message?.id)) continue;
+    if (!latest || (message.time?.created || 0) >= (latest.time?.created || 0)) latest = message;
+  }
+  return latest ? latest.id : null;
 };
 
 /**
@@ -372,6 +416,8 @@ export const createOpenChamberSessionService = (dependencies) => {
     broadcastGlobalUiEvent,
     createSessionGoal: createSessionGoalOverride,
     sessionKnowledgeRuntime = null,
+    worktreeBootstrapStore,
+    hydrateWorktreeCheckout,
     dataDir = null,
     archiveStore: injectedArchiveStore = null,
     sessionMetadataStore: injectedSessionMetadataStore = null,
@@ -387,6 +433,9 @@ export const createOpenChamberSessionService = (dependencies) => {
     // `openchamber/auto` (Session Defaults) is resolved here before the
     // session is switched onto it. Null when routing is not wired in.
     resolveAutoSelection = null,
+    // Whether routing can run Auto right now (the composer's own test). Null
+    // when routing is not wired in.
+    isAutoReady = null,
   } = dependencies;
 
   if ((!injectedArchiveStore || !injectedSessionMetadataStore) && !dataDir) {
@@ -409,10 +458,10 @@ export const createOpenChamberSessionService = (dependencies) => {
     directory,
   });
 
-  const waitForWorktreeBootstrapReady = async ({ directory }) => {
+  const waitForWorktreeBootstrapReady = async ({ directory, bootstrapStore }) => {
     const deadline = Date.now() + WORKTREE_BOOTSTRAP_TIMEOUT_MS;
     for (;;) {
-      const status = await getWorktreeBootstrapStatus(directory);
+      const status = await getWorktreeBootstrapStatus(directory, { bootstrapStore });
       if (status?.status === 'failed') {
         throw new OpenChamberControlError(`Worktree bootstrap failed: ${status.error || 'unknown error'}`, 500);
       }
@@ -512,9 +561,15 @@ export const createOpenChamberSessionService = (dependencies) => {
     }
     if (!model || !agent) {
       const inputs = await fetchSelectionInputs({ client, readSettingsFromDiskMigrated });
+      // Asked only when the last chat pick is Auto; an unanswerable question
+      // skips that pick rather than refusing the request.
+      const autoAvailable = isAutoModel(splitModel(inputs.settings?.lastSelectedModel))
+        && isAutoReady !== null
+        && await isAutoReady().catch(() => false);
       const defaults = resolveDefaultSelection({
         ...inputs,
         projectDefaults: resolveProjectDefaults(inputs.settings, directory, projectId),
+        autoAvailable,
       });
       if (!model) {
         model = defaults.model;
@@ -781,9 +836,25 @@ export const createOpenChamberSessionService = (dependencies) => {
     }
 
     if (worktreeInput) {
-      worktree = await createWorktree(resolvedDirectory.directory, worktreeInput);
+      if (!(hydrateWorktreeCheckout instanceof Function)
+        || !(worktreeBootstrapStore?.read instanceof Function)
+        || !(worktreeBootstrapStore?.write instanceof Function)) {
+        throw new OpenChamberControlError('Worktree checkout bootstrap is not available', 501);
+      }
+      const hydrateCheckout = ({ directory, parentRemoteName }) => hydrateWorktreeCheckout({
+        directory,
+        parentDirectory: resolvedDirectory.directory,
+        parentRemoteName,
+      });
+      worktree = await createWorktree(resolvedDirectory.directory, worktreeInput, {
+        bootstrapStore: worktreeBootstrapStore,
+        hydrateCheckout,
+      });
       sessionDirectory = worktree.path;
-      await waitForWorktreeBootstrapReady({ directory: sessionDirectory });
+      await waitForWorktreeBootstrapReady({
+        directory: sessionDirectory,
+        bootstrapStore: worktreeBootstrapStore,
+      });
     }
 
     const baseUrl = openCodeBaseUrl();
@@ -909,6 +980,7 @@ export const createOpenChamberSessionService = (dependencies) => {
         client,
         sessionID: targetSessionID,
       });
+      const baselineIdleRecordId = await latestIdleRecordID({ client, sessionID: targetSessionID });
 
       const dispatch = await dispatchPrompt({
         client,
@@ -931,6 +1003,7 @@ export const createOpenChamberSessionService = (dependencies) => {
         ...(action === 'fork' ? { sourceSessionId: sourceSessionID } : {}),
         ...(targetSession?.title ? { title: targetSession.title } : {}),
         ...(baselineAssistantMessageId ? { baselineAssistantMessageId } : {}),
+        ...(baselineIdleRecordId !== undefined ? { baselineIdleRecordId } : {}),
         model: dispatch.model,
         ...(dispatch.agent ? { agent: dispatch.agent } : {}),
         ...(dispatch.variant ? { variant: dispatch.variant } : {}),

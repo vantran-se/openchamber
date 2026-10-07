@@ -1,5 +1,5 @@
 import { canReuseManagedOpenCodePreflight } from './opencode-readiness.mjs';
-import { app, BrowserWindow, dialog, ipcMain, Menu, MessageChannelMain, nativeTheme, net as electronNet, Notification, powerMonitor, powerSaveBlocker, protocol, session, shell, webContents } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, MessageChannelMain, nativeTheme, net as electronNet, Notification, powerMonitor, powerSaveBlocker, protocol, session, shell, webContents } from 'electron';
 import contextMenu from 'electron-context-menu';
 import log from 'electron-log/main.js';
 import dgram from 'node:dgram';
@@ -51,11 +51,15 @@ import {
   wasEarlyWindowClosed,
 } from './early-startup.mjs';
 import { sanitizeRuntimeRequestHeaders } from './runtime-request-headers.mjs';
+import { isSplashColor, redactHostsConfigForRemote } from './remote-page-policy.mjs';
+import { isPackagedUiRuntimeRequest } from './packaged-ui-routing.mjs';
 import { probeDirectHostWithRetry } from './host-probe-policy.mjs';
 import { probeElectronHostWithDeadline } from './electron-host-probe.mjs';
 import { assertUpdaterCapability } from './updater-capability.mjs';
 import { checkForDesktopUpdate } from './updater-check.mjs';
 import { resolveUpdaterChannel } from './updater-channel.mjs';
+import { convertShortcutComboToAccelerator, MINI_CHAT_GLOBAL_SHORTCUT_SETTING_KEY, normalizeStoredShortcutCombo, selectMiniChatGlobalShortcutAction } from './mini-chat-global-shortcut.mjs';
+import { createContextMenuLabels, menuLabel, normalizeMenuLocale, roleMenuItem } from './menu-locales.mjs';
 import { resolveUpdaterFeed } from './updater-feed.mjs';
 import {
   buildLinuxInstalledApps,
@@ -69,10 +73,16 @@ import {
   setLinuxAutostartEnabled,
 } from './linux-autostart.mjs';
 import { unsupportedAppSpecificOpenError, validateLocalPath } from './path-open-utils.mjs';
-import { shouldAllowBrowserPanelCertificateError } from './browser-panel-security.mjs';
+import {
+  browserPanelPermissionAuditDetails,
+  plainChromeUserAgent,
+  shouldAllowBrowserPanelCertificateError,
+  shouldAllowBrowserPanelPermission,
+} from './browser-panel-security.mjs';
 import { shouldBlockGuestFrameNavigation } from './guest-frame-navigation.mjs';
 import { createRelayDevTunnelBridge } from './relay-dev-tunnel.mjs';
 import { attachRendererRecovery } from './renderer-recovery.mjs';
+import { createLoadFailureWarningFilter } from './load-failure-warnings.mjs';
 import { mintOutsideFileGrant } from '@vantran-se/openchamber-web/server/lib/fs/routes.js';
 import { fetchUpdateNotes } from '@vantran-se/openchamber-web/server/lib/changelog/update-notes.js';
 import { applyConnectAttemptTimeout } from '@vantran-se/openchamber-web/server/lib/network-defaults.js';
@@ -105,6 +115,19 @@ log.transports.console.level = isDev ? 'debug' : 'warn';
 // the fact. Route all console calls through electron-log so server-side
 // diagnostics are persisted.
 Object.assign(console, log.functions);
+
+// Node prints process warnings through console.error, so Electron's per-attempt
+// "Failed to load URL" warnings would flood main.log while the browser panel
+// waits for a dev server. Wrap Node's printer so repeats go to debug instead.
+const printProcessWarning = process.listeners('warning').find((listener) => listener.name === 'onWarning');
+if (printProcessWarning) {
+  const shouldReportWarning = createLoadFailureWarningFilter();
+  process.off('warning', printProcessWarning);
+  process.on('warning', (warning) => {
+    if (shouldReportWarning(warning)) printProcessWarning(warning);
+    else log.debug(`electron: ${warning.message}`);
+  });
+}
 
 const STARTUP_PERF_ENABLED_VALUES = new Set(['1', 'true']);
 const ELECTRON_STARTUP_PERF_PHASES = new Set([
@@ -381,6 +404,14 @@ const prepareForQuit = () => {
     app.removeListener('browser-window-focus', state.trayFocusListener);
     state.trayFocusListener = null;
   }
+  try {
+    globalShortcut.unregisterAll();
+  } catch {
+  }
+  if (state.miniChatFocusListener) {
+    app.removeListener('browser-window-focus', state.miniChatFocusListener);
+    state.miniChatFocusListener = null;
+  }
 
   if (state.mainWindow && !state.mainWindow.isDestroyed()) {
     try {
@@ -525,8 +556,10 @@ const sshManager = new ElectronSshManager({
 
 const writeJsonFile = async (filePath, data) => {
   const directory = path.dirname(filePath);
-  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') await fsp.chmod(directory, 0o700);
+  // Tighten only a directory this write created: an existing one keeps the
+  // permissions and ACLs an administrator gave it.
+  const created = await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  if (created && process.platform !== 'win32') await fsp.chmod(directory, 0o700);
   // Atomic: write to a temp file then rename. Readers never see a partial
   // JSON file that could parse-error and get coerced to {}.
   const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1010,6 +1043,7 @@ const resolveBrowserPanelContents = (rawId) => {
 
 const hardenBrowserPanelSession = () => {
   const panelSession = session.fromPartition(BROWSER_PANEL_PARTITION);
+  panelSession.setUserAgent(plainChromeUserAgent(panelSession.getUserAgent()));
 
   app.on('certificate-error', (event, contents, url, error, _certificate, callback) => {
     if (contents.session === panelSession && shouldAllowBrowserPanelCertificateError({ url, error })) {
@@ -1020,17 +1054,32 @@ const hardenBrowserPanelSession = () => {
     callback(false);
   });
 
-  panelSession.setPermissionRequestHandler((_contents, permission, callback, details) => {
-    log.info('[electron] browser panel denied a permission request', {
+  panelSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const allowed = shouldAllowBrowserPanelPermission({
       permission,
-      origin: details?.requestingUrl || '',
+      requestingUrl: details?.requestingUrl || '',
+      isFocused: contents.isFocused(),
     });
+    if (allowed) {
+      callback(true);
+      return;
+    }
+    log.info('[electron] browser panel denied a permission request', browserPanelPermissionAuditDetails({
+      permission,
+      requestingUrl: details?.requestingUrl || '',
+    }));
     callback(false);
   });
 
   // Asked before some features even request; answering here keeps a page from
   // reporting a capability it would then be denied.
-  panelSession.setPermissionCheckHandler(() => false);
+  panelSession.setPermissionCheckHandler((contents, permission, requestingOrigin) => (
+    shouldAllowBrowserPanelPermission({
+      permission,
+      requestingUrl: requestingOrigin,
+      isFocused: contents?.isFocused() === true,
+    })
+  ));
 
   // Serial, HID and USB device pickers.
   panelSession.setDevicePermissionHandler(() => false);
@@ -1039,6 +1088,17 @@ const hardenBrowserPanelSession = () => {
 const registerPackagedUiProtocol = () => {
   if (!shouldUsePackagedUi()) return;
   installPackagedUiRequestHandler(async (request) => {
+    if (isPackagedUiRuntimeRequest(request.url)) {
+      // Runtime requests must already target the per-window injected HTTP base.
+      // A shared protocol handler cannot infer which window/runtime owns a
+      // relative request, so fail closed instead of serving the app shell or
+      // forwarding credentials to the wrong host.
+      return Response.json(
+        { error: { code: 'runtime_unavailable' } },
+        { status: 503, headers: { 'x-openchamber-error': 'runtime-unavailable' } },
+      );
+    }
+
     const distPath = resolveWebDistDir();
     let requestedPath = '/index.html';
     try {
@@ -1587,7 +1647,11 @@ const loginRemoteAndIssueClientToken = async ({ url, password, trustDevice, requ
     ? { clientKind: LOCAL_DESKTOP_CLIENT_KIND, dedupeKey: LOCAL_DESKTOP_CLIENT_DEDUPE_KEY, ...desktopDeviceMetadata() }
     : { clientKind: REMOTE_DESKTOP_CLIENT_KIND, dedupeKey: `desktop:${await getOrCreateDesktopInstallId()}`, ...desktopDeviceMetadata() };
 
-  const loginResponse = await fetch(new URL('/auth/session', `${baseUrl}/`).toString(), {
+  // Keep a sub-path prefix (https://host/openchamber); new URL('/auth/session', base) would drop it.
+  const loginUrl = new URL(baseUrl);
+  loginUrl.pathname = `${loginUrl.pathname.replace(/\/+$/, '')}/auth/session`;
+  loginUrl.search = '';
+  const loginResponse = await fetch(loginUrl.toString(), {
     method: 'POST',
     signal: AbortSignal.timeout(10_000),
     headers: {
@@ -2031,6 +2095,22 @@ const dispatchDomEventToWindow = (browserWindow, event, detail) => {
   void browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
 };
 
+const closeTabTargets = new WeakSet();
+const closeTabWatched = new WeakSet();
+
+/** Cmd/Ctrl+W: the page's own tab when it has one open, else the window. */
+const closeTabOrWindow = () => {
+  // Only the focused window: with an About panel or nothing of ours in front,
+  // falling back to the main window would close the wrong thing.
+  const target = BrowserWindow.getFocusedWindow();
+  if (!target || target.isDestroyed()) return;
+  if (closeTabTargets.has(target.webContents)) {
+    dispatchDomEventToWindow(target, 'openchamber:close-tab');
+    return;
+  }
+  target.close();
+};
+
 const getMenuTargetWindow = () => {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && !focused.isDestroyed()) return focused;
@@ -2065,6 +2145,87 @@ const dispatchAddSelectionToChat = () => {
 const dispatchOpenMiniChat = (browserWindow) => {
   const target = browserWindow && !browserWindow.isDestroyed() ? browserWindow : getMenuTargetWindow();
   if (target) emitToWindow(target, 'openchamber:open-mini-chat');
+};
+
+// Mini Chat global shortcut. The combo is stored in settings.json under
+// desktopMiniChatGlobalShortcut using the in-app shortcut syntax. Electron
+// globalShortcut accepts a single accelerator, so the combo must convert; a
+// stored combo that fails to convert (or is taken by another app) stays
+// configured but inactive, and the settings row surfaces that state.
+let registeredMiniChatGlobalShortcutAccelerator = null;
+
+const readDesktopMiniChatGlobalShortcutStatus = () => {
+  const combo = normalizeStoredShortcutCombo(readSettingsRoot()[MINI_CHAT_GLOBAL_SHORTCUT_SETTING_KEY]);
+  return { supported: true, combo, active: registeredMiniChatGlobalShortcutAccelerator !== null };
+};
+
+const ensureMiniChatFocusStampListener = () => {
+  if (state.miniChatFocusListener) return;
+  state.miniChatFocusListener = (_event, browserWindow) => {
+    if (browserWindow && !browserWindow.isDestroyed() && browserWindow.__ocMiniChat === true) {
+      browserWindow.__ocMiniChatFocusedAt = Date.now();
+    }
+  };
+  app.on('browser-window-focus', state.miniChatFocusListener);
+};
+
+const handleMiniChatGlobalShortcut = () => {
+  const action = selectMiniChatGlobalShortcutAction(
+    BrowserWindow.getAllWindows().map((browserWindow) => ({
+      id: browserWindow.id,
+      isMiniChat: browserWindow.__ocMiniChat === true,
+      isFocused: browserWindow.isFocused(),
+      focusedAt: browserWindow.__ocMiniChatFocusedAt ?? 0,
+    })),
+    { hasRendererWindow: getMenuTargetWindow() !== null },
+  );
+  if (action.type === 'hide' || action.type === 'focus') {
+    const target = BrowserWindow.fromId(action.windowId);
+    if (!target || target.isDestroyed()) return;
+    if (action.type === 'hide') {
+      target.hide();
+    } else {
+      if (!target.isVisible()) target.show();
+      target.focus();
+    }
+    return;
+  }
+  if (action.type === 'reveal-main') {
+    // No renderer window is alive (windowless tray mode): the renderer owns
+    // draft-mini-chat creation, so surface the main window and let the next
+    // press open one.
+    void revealMainWindow();
+    return;
+  }
+  dispatchOpenMiniChat();
+};
+
+const applyDesktopMiniChatGlobalShortcut = () => {
+  if (registeredMiniChatGlobalShortcutAccelerator !== null) {
+    try {
+      globalShortcut.unregister(registeredMiniChatGlobalShortcutAccelerator);
+    } catch {
+    }
+    registeredMiniChatGlobalShortcutAccelerator = null;
+  }
+  const { combo } = readDesktopMiniChatGlobalShortcutStatus();
+  if (!combo) return;
+  const accelerator = convertShortcutComboToAccelerator(combo);
+  if (!accelerator) {
+    log.warn('[electron] mini chat global shortcut: unsupported combo', { combo });
+    return;
+  }
+  try {
+    globalShortcut.register(accelerator, handleMiniChatGlobalShortcut);
+    if (globalShortcut.isRegistered(accelerator)) {
+      registeredMiniChatGlobalShortcutAccelerator = accelerator;
+      ensureMiniChatFocusStampListener();
+    } else {
+      log.warn('[electron] mini chat global shortcut: combo is taken by another app', { combo, accelerator });
+    }
+  } catch (error) {
+    log.warn('[electron] mini chat global shortcut: registration failed', error);
+  }
 };
 
 const dispatchCheckForUpdates = () => {
@@ -2287,8 +2448,13 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
       });
       return { action: 'deny' };
     }
+    // A page of this app opened into a new window would be a bare browser
+    // window: no desktop runtime, no window chrome, no credentials. A link to
+    // a session here moves this window to it; any other app page stays put.
     if (isAllowedNavigationUrl(url, { includeHosts: false })) {
-      return { action: 'allow' };
+      const route = sessionRouteFromUrl(url);
+      if (route) emitToWindow(browserWindow, 'openchamber:open-session', route);
+      return { action: 'deny' };
     }
     void shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
@@ -2312,6 +2478,9 @@ const createBrowserWindow = ({ label, restoreGeometry, url, runtimeConfig = {}, 
     if (!shouldBlockGuestFrameNavigation({
       isMainFrame: details.isMainFrame,
       frameOrigin,
+      frame: details.frame,
+      initiator: details.initiator,
+      mainFrame: browserWindow.webContents.mainFrame,
       url: details.url,
       isAppOrigin: isAllowedNavigationUrl,
     })) return;
@@ -2669,9 +2838,9 @@ const createMiniChatWindow = async ({ mode, sessionId = '', directory = '', proj
     icon: getWindowIconPath(),
     show: false,
     backgroundColor: resolveSplashBackgroundColor(),
-    frame: usesFramelessChrome ? false : undefined,
+    frame: usesFramelessChrome() ? false : undefined,
     autoHideMenuBar: process.platform !== 'darwin',
-    titleBarStyle: process.platform === 'darwin' || usesFramelessChrome ? 'hidden' : 'default',
+    titleBarStyle: process.platform === 'darwin' || usesFramelessChrome() ? 'hidden' : 'default',
     trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 17 } : undefined,
     webPreferences: {
       additionalArguments: buildRendererAdditionalArguments({
@@ -3511,9 +3680,6 @@ const buildWindowsOpenProjectSpecs = ({ projectPath, appId, appName }) => {
 };
 
 const buildWindowsOpenFileSpecs = ({ filePath, appId, appName }) => {
-  if (appId === 'finder') {
-    return [{ program: 'explorer.exe', args: ['/select,', filePath] }];
-  }
   if (appId === 'terminal') {
     return buildWindowsOpenProjectSpecs({ projectPath: path.dirname(filePath), appId, appName });
   }
@@ -3691,6 +3857,27 @@ const closeAllDevTunnels = () => {
 
 const handleInvoke = async (browserWindow, command, args = {}) => {
   switch (command) {
+    // The page says whether Cmd/Ctrl+W has a tab of its own to close (a file
+    // open in Files). The menu decides in this process, so a page that never
+    // reports one, older or remote, keeps closing the window as before.
+    case 'desktop_set_close_tab_target': {
+      const contents = browserWindow && !browserWindow.isDestroyed() ? browserWindow.webContents : null;
+      if (!contents) return null;
+      if (args?.active === true) {
+        closeTabTargets.add(contents);
+        // A reload or navigation drops the page that registered; until the
+        // new page reports again, the shortcut closes the window.
+        if (!closeTabWatched.has(contents)) {
+          closeTabWatched.add(contents);
+          const forget = () => closeTabTargets.delete(contents);
+          contents.on('did-navigate', forget);
+          contents.on('render-process-gone', forget);
+        }
+      } else {
+        closeTabTargets.delete(contents);
+      }
+      return null;
+    }
     case 'desktop_pick_theme_file': {
       const { pickThemeFile } = await import('./theme-file-picker.mjs');
       return pickThemeFile({ showDialog: (options) => dialog.showOpenDialog(browserWindow || undefined, options) });
@@ -3791,6 +3978,25 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       return { supported: true, enabled, active };
     }
 
+    case 'desktop_get_mini_chat_global_shortcut': {
+      return readDesktopMiniChatGlobalShortcutStatus();
+    }
+
+    case 'desktop_set_mini_chat_global_shortcut': {
+      const combo = normalizeStoredShortcutCombo(args.combo);
+      // A combo the OS cannot grab leaves the stored setting untouched and
+      // says why, so the settings row can explain instead of failing generically.
+      if (combo !== null && convertShortcutComboToAccelerator(combo) === null) {
+        return { ...readDesktopMiniChatGlobalShortcutStatus(), error: 'unsupported-combo' };
+      }
+      await mutateSettingsRoot((root) => {
+        if (combo === null) delete root[MINI_CHAT_GLOBAL_SHORTCUT_SETTING_KEY];
+        else root[MINI_CHAT_GLOBAL_SHORTCUT_SETTING_KEY] = combo;
+      });
+      applyDesktopMiniChatGlobalShortcut();
+      return readDesktopMiniChatGlobalShortcutStatus();
+    }
+
     // Dev-server tunnels: bind a loopback port here and pipe it to a dev server
     // on the remote OpenChamber host, so the browser panel loads a real origin
     // instead of a rewritten page. Deliberately absent from
@@ -3817,7 +4023,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
 
       const client = await getDevTunnelClient();
       const result = await client.open({ baseUrl, port, headers });
-      return { localPort: result.localPort, reused: result.reused, url: `http://127.0.0.1:${result.localPort}/` };
+      return { localPort: result.localPort, reused: result.reused, url: `http://openchamber-preview.localhost:${result.localPort}/` };
     }
 
     case 'desktop_dev_tunnel_close': {
@@ -4169,6 +4375,11 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       }
       const validated = await validateLocalPath(filePath, 'File path');
       if (process.platform === 'win32') {
+        // The shell's own reveal, so a replacement file manager handles it too.
+        if (appId === 'finder') {
+          shell.showItemInFolder(validated.path);
+          return null;
+        }
         runSpecChain(buildWindowsOpenFileSpecs({ filePath: validated.path, appId, appName }), appName);
         return null;
       }
@@ -4322,7 +4533,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       if (splash) {
         const colors = {};
         for (const key of ['bgLight', 'fgLight', 'bgDark', 'fgDark']) {
-          if (typeof splash[key] === 'string' && splash[key].trim()) colors[key] = splash[key].trim();
+          if (isSplashColor(splash[key])) colors[key] = splash[key];
         }
         if (Object.keys(colors).length === 4) {
           const current = readSettingsRoot().desktopSplashColors;
@@ -4457,6 +4668,19 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
         }
       }
       if (applyUpdate) {
+        // A previous restart click may still be installing: Squirrel accepts
+        // one quitAndInstall() per app session, so a second call throws
+        // SQRLUpdaterErrorInvalidState, and installDownloadedUpdate()'s
+        // fail() path would roll the quit state back while the first install
+        // is still in flight (#3670). updateInstallPending latches
+        // synchronously when the install starts and covers the backend-shutdown
+        // window; installingUpdate covers the tail after the installer has
+        // taken over the exit. A duplicate click joins the same restart
+        // instead of starting a second install.
+        if (state.updateInstallPending || state.installingUpdate) {
+          log.info('[electron] desktop_restart ignored, update install already in flight');
+          return null;
+        }
         // The quit/install flags belong to installDownloadedUpdate(), which
         // sets them once the backend is down and the installer is about to take
         // over. Setting them here left a window in which closing the last
@@ -4617,12 +4841,23 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
     case 'desktop_get_current_window_state':
       return { maximized: Boolean(browserWindow && !browserWindow.isDestroyed() && browserWindow.isMaximized()) };
 
+    case 'desktop_set_locale': {
+      if (typeof args.locale === 'string') {
+        setContextMenuLocale(args.locale);
+        if (process.platform === 'darwin') {
+          Menu.setApplicationMenu(buildMacMenu(normalizeMenuLocale(args.locale)));
+        }
+      }
+      return null;
+    }
+
     case 'desktop_show_app_menu': {
       if (!browserWindow || browserWindow.isDestroyed()) {
         return null;
       }
 
-      const menu = Menu.getApplicationMenu() || buildAutoHiddenMenu();
+      const locale = typeof args.locale === 'string' ? args.locale : 'en';
+      const menu = buildAutoHiddenMenu(locale);
       const x = Number.isFinite(Number(args.x)) ? Math.max(0, Math.round(Number(args.x))) : undefined;
       const y = Number.isFinite(Number(args.y)) ? Math.max(0, Math.round(Number(args.y))) : undefined;
       menu.popup({ window: browserWindow, x, y });
@@ -4668,8 +4903,10 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
   }
 };
 
-const buildMacMenu = () => {
+const buildMacMenu = (locale = 'en') => {
   const dispatchAction = (action) => dispatchMenuAction(action);
+  const t = (key) => menuLabel(locale, key);
+  const roleItem = (role, key) => roleMenuItem(locale, role, key);
   const handleCopyAction = () => {
     BrowserWindow.getFocusedWindow()?.webContents.copy();
     dispatchAction('copy');
@@ -4677,109 +4914,111 @@ const buildMacMenu = () => {
 
   return Menu.buildFromTemplate([
     {
-      label: app.name,
+      label: t('app.name'),
       submenu: [
-        { label: 'About OpenChamber', click: () => dispatchAction('about') },
+        { label: t('about'), click: () => dispatchAction('about') },
         {
-          label: 'Check for Updates',
+          label: t('checkForUpdates'),
           click: () => dispatchCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: 'Settings', accelerator: 'Cmd+,', click: () => dispatchAction('settings') },
-        { label: 'Reload Webview', click: () => reloadMenuTargetWindow() },
-        { label: 'Restart', click: () => relaunchFromMenu() },
-        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => dispatchAction('command-palette') },
+        { label: t('settings'), accelerator: 'Cmd+,', click: () => dispatchAction('settings') },
+        { label: t('reloadWebview'), click: () => reloadMenuTargetWindow() },
+        { label: t('restart'), click: () => relaunchFromMenu() },
+        { label: t('commandPalette'), accelerator: 'Cmd+P', click: () => dispatchAction('command-palette') },
         { type: 'separator' },
-        { role: 'services' },
+        roleItem('services', 'services'),
         { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
+        roleItem('hide', 'hide'),
+        roleItem('hideOthers', 'hideOthers'),
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'File',
+      label: t('file'),
       submenu: [
-        { label: 'New Window', accelerator: 'Cmd+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
+        { label: t('newWindow'), accelerator: 'Cmd+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
         { type: 'separator' },
-        { label: 'New Session', accelerator: 'Cmd+N', click: () => dispatchAction('new-session') },
-        { label: 'New Worktree', accelerator: 'Cmd+Shift+N', click: () => dispatchAction('new-worktree-session') },
+        { label: t('newSession'), accelerator: 'Cmd+N', click: () => dispatchAction('new-session') },
+        { label: t('newWorktree'), accelerator: 'Cmd+Shift+N', click: () => dispatchAction('new-worktree-session') },
         // registerAccelerator:false → show the shortcut hint but let the
         // renderer own the (customizable) key binding, avoiding a double open.
-        { label: 'New Mini Chat', accelerator: 'Cmd+Alt+N', registerAccelerator: false, click: () => dispatchOpenMiniChat() },
+        { label: t('newMiniChat'), accelerator: 'Cmd+Alt+N', registerAccelerator: false, click: () => dispatchOpenMiniChat() },
         { type: 'separator' },
-        { label: 'Add Workspace', click: () => dispatchAction('change-workspace') },
+        { label: t('addWorkspace'), click: () => dispatchAction('change-workspace') },
         { type: 'separator' },
-        { role: 'close' },
+        { label: t('close'), accelerator: 'CmdOrCtrl+W', click: closeTabOrWindow },
       ],
     },
     {
-      label: 'Edit',
+      label: t('edit'),
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        roleItem('undo', 'undo'),
+        roleItem('redo', 'redo'),
         { type: 'separator' },
-        { role: 'cut' },
-        { label: 'Copy', accelerator: 'Cmd+C', click: () => handleCopyAction() },
-        { label: 'Add Selection to Chat', accelerator: 'Cmd+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        roleItem('cut', 'cut'),
+        { label: t('copy'), accelerator: 'Cmd+C', click: () => handleCopyAction() },
+        { label: t('addSelectionToChat'), accelerator: 'Cmd+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
+        roleItem('paste', 'paste'),
+        roleItem('selectAll', 'selectAll'),
       ],
     },
     {
-      label: 'View',
+      label: t('view'),
       submenu: [
-        { label: 'Toggle Right Sidebar', accelerator: 'Cmd+B', click: () => dispatchAction('toggle-right-sidebar') },
-        { label: 'Open Git Sidebar', accelerator: 'Cmd+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
-        { label: 'Open Files Sidebar', accelerator: 'Cmd+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
+        { label: t('toggleRightSidebar'), accelerator: 'Cmd+B', click: () => dispatchAction('toggle-right-sidebar') },
+        { label: t('openGitSidebar'), accelerator: 'Cmd+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
+        { label: t('openFilesSidebar'), accelerator: 'Cmd+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
         { type: 'separator' },
-        { label: 'Toggle Terminal Dock', accelerator: 'Cmd+J', click: () => dispatchAction('toggle-terminal') },
-        { label: 'Toggle Terminal Expanded', accelerator: 'Cmd+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
+        { label: t('toggleTerminalDock'), accelerator: 'Cmd+J', click: () => dispatchAction('toggle-terminal') },
+        { label: t('toggleTerminalExpanded'), accelerator: 'Cmd+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
         { type: 'separator' },
-        { label: 'Light Theme', click: () => dispatchAction('theme-light') },
-        { label: 'Dark Theme', click: () => dispatchAction('theme-dark') },
-        { label: 'System Theme', click: () => dispatchAction('theme-system') },
+        { label: t('lightTheme'), click: () => dispatchAction('theme-light') },
+        { label: t('darkTheme'), click: () => dispatchAction('theme-dark') },
+        { label: t('systemTheme'), click: () => dispatchAction('theme-system') },
         { type: 'separator' },
-        { label: 'Toggle Session Sidebar', accelerator: 'Cmd+Alt+L', click: () => dispatchAction('toggle-sidebar') },
-        { label: 'Toggle Memory Debug', accelerator: 'Cmd+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
+        { label: t('toggleSessionSidebar'), accelerator: 'Cmd+Alt+L', click: () => dispatchAction('toggle-sidebar') },
+        { label: t('toggleMemoryDebug'), accelerator: 'Cmd+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
       ],
     },
     {
-      label: 'Window',
+      label: t('window'),
       submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
+        roleItem('minimize', 'minimize'),
+        roleItem('zoom', 'zoom'),
         { type: 'separator' },
-        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => dispatchAction('zoom-in') },
-        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => dispatchAction('zoom-out') },
-        { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => dispatchAction('zoom-reset') },
+        { label: t('zoomIn'), accelerator: 'CmdOrCtrl+=', click: () => dispatchAction('zoom-in') },
+        { label: t('zoomOut'), accelerator: 'CmdOrCtrl+-', click: () => dispatchAction('zoom-out') },
+        { label: t('resetZoom'), accelerator: 'CmdOrCtrl+0', click: () => dispatchAction('zoom-reset') },
         { type: 'separator' },
-        { role: 'close' },
+        { label: t('close'), accelerator: 'CmdOrCtrl+W', click: closeTabOrWindow },
       ],
     },
     {
-      label: 'Help',
+      label: t('help'),
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'Cmd+.', click: () => dispatchAction('help-dialog') },
-        { label: 'Show Diagnostics', accelerator: 'Cmd+Shift+L', click: () => dispatchAction('download-logs') },
-        { label: 'Toggle Developer Tools', accelerator: 'Cmd+Alt+I', click: () => openDevToolsForMenuTarget() },
+        { label: t('keyboardShortcuts'), accelerator: 'Cmd+.', click: () => dispatchAction('help-dialog') },
+        { label: t('showDiagnostics'), accelerator: 'Cmd+Shift+L', click: () => dispatchAction('download-logs') },
+        { label: t('toggleDeveloperTools'), accelerator: 'Cmd+Alt+I', click: () => openDevToolsForMenuTarget() },
         { type: 'separator' },
-        { label: 'Clear Cache', click: () => void handleInvoke(null, 'desktop_clear_cache') },
+        { label: t('clearCache'), click: () => void handleInvoke(null, 'desktop_clear_cache') },
         { type: 'separator' },
-        { label: 'Report a Bug', click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
-        { label: 'Discuss an Idea', click: () => shell.openExternal(GITHUB_IDEAS_URL) },
+        { label: t('reportABug'), click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
+        { label: t('discussAnIdea'), click: () => shell.openExternal(GITHUB_IDEAS_URL) },
         { type: 'separator' },
-        { label: 'Join Discord', click: () => shell.openExternal(DISCORD_INVITE_URL) },
+        { label: t('joinDiscord'), click: () => shell.openExternal(DISCORD_INVITE_URL) },
       ],
     },
   ]);
 };
 
-const buildAutoHiddenMenu = () => {
+const buildAutoHiddenMenu = (locale = 'en') => {
   const dispatchAction = (action) => dispatchMenuAction(action);
+  const t = (key) => menuLabel(locale, key);
+  const roleItem = (role, key) => roleMenuItem(locale, role, key);
   const handleCopyAction = () => {
     BrowserWindow.getFocusedWindow()?.webContents.copy();
     dispatchAction('copy');
@@ -4787,115 +5026,118 @@ const buildAutoHiddenMenu = () => {
 
   return Menu.buildFromTemplate([
     {
-      label: 'OpenChamber',
+      label: t('app.name'),
       submenu: [
-        { label: 'About OpenChamber', click: () => dispatchAction('about') },
+        { label: t('about'), click: () => dispatchAction('about') },
         {
-          label: 'Check for Updates',
+          label: t('checkForUpdates'),
           click: () => dispatchCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: 'Settings', accelerator: 'Ctrl+,', click: () => dispatchAction('settings') },
-        { label: 'Reload Webview', click: () => reloadMenuTargetWindow() },
-        { label: 'Restart', click: () => relaunchFromMenu() },
-        { label: 'Command Palette', accelerator: 'Ctrl+P', click: () => dispatchAction('command-palette') },
+        { label: t('settings'), accelerator: 'Ctrl+,', click: () => dispatchAction('settings') },
+        { label: t('reloadWebview'), click: () => reloadMenuTargetWindow() },
+        { label: t('restart'), click: () => relaunchFromMenu() },
+        { label: t('commandPalette'), accelerator: 'Ctrl+P', click: () => dispatchAction('command-palette') },
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'File',
+      label: t('file'),
       submenu: [
-        { label: 'New Window', accelerator: 'Ctrl+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
+        { label: t('newWindow'), accelerator: 'Ctrl+Shift+Alt+N', click: () => void handleInvoke(null, 'desktop_new_window') },
         { type: 'separator' },
-        { label: 'New Session', accelerator: 'Ctrl+N', click: () => dispatchAction('new-session') },
-        { label: 'New Worktree', accelerator: 'Ctrl+Shift+N', click: () => dispatchAction('new-worktree-session') },
+        { label: t('newSession'), accelerator: 'Ctrl+N', click: () => dispatchAction('new-session') },
+        { label: t('newWorktree'), accelerator: 'Ctrl+Shift+N', click: () => dispatchAction('new-worktree-session') },
         { type: 'separator' },
-        { label: 'Add Workspace', click: () => dispatchAction('change-workspace') },
+        { label: t('addWorkspace'), click: () => dispatchAction('change-workspace') },
         { type: 'separator' },
-        { role: 'quit' },
+        roleItem('quit', 'quit'),
       ],
     },
     {
-      label: 'Edit',
+      label: t('edit'),
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        roleItem('undo', 'undo'),
+        roleItem('redo', 'redo'),
         { type: 'separator' },
-        { role: 'cut' },
-        { label: 'Copy', accelerator: 'Ctrl+C', click: () => handleCopyAction() },
-        { label: 'Add Selection to Chat', accelerator: 'Ctrl+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        roleItem('cut', 'cut'),
+        { label: t('copy'), accelerator: 'Ctrl+C', click: () => handleCopyAction() },
+        { label: t('addSelectionToChat'), accelerator: 'Ctrl+L', registerAccelerator: false, click: () => dispatchAddSelectionToChat() },
+        roleItem('paste', 'paste'),
+        roleItem('selectAll', 'selectAll'),
       ],
     },
     {
-      label: 'View',
+      label: t('view'),
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { label: 'Toggle Developer Tools', accelerator: 'Ctrl+Alt+I', click: () => openDevToolsForMenuTarget() },
+        roleItem('reload', 'reload'),
+        roleItem('forceReload', 'forceReload'),
+        { label: t('toggleDeveloperTools'), accelerator: 'Ctrl+Alt+I', click: () => openDevToolsForMenuTarget() },
         { type: 'separator' },
-        { label: 'Toggle Right Sidebar', accelerator: 'Ctrl+B', click: () => dispatchAction('toggle-right-sidebar') },
-        { label: 'Open Git Sidebar', accelerator: 'Ctrl+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
-        { label: 'Open Files Sidebar', accelerator: 'Ctrl+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
+        { label: t('toggleRightSidebar'), accelerator: 'Ctrl+B', click: () => dispatchAction('toggle-right-sidebar') },
+        { label: t('openGitSidebar'), accelerator: 'Ctrl+Shift+G', click: () => dispatchAction('open-right-sidebar-git') },
+        { label: t('openFilesSidebar'), accelerator: 'Ctrl+Shift+F', click: () => dispatchAction('open-right-sidebar-files') },
         { type: 'separator' },
-        { label: 'Toggle Terminal Dock', accelerator: 'Ctrl+J', click: () => dispatchAction('toggle-terminal') },
-        { label: 'Toggle Terminal Expanded', accelerator: 'Ctrl+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
+        { label: t('toggleTerminalDock'), accelerator: 'Ctrl+J', click: () => dispatchAction('toggle-terminal') },
+        { label: t('toggleTerminalExpanded'), accelerator: 'Ctrl+Shift+J', click: () => dispatchAction('toggle-terminal-expanded') },
         { type: 'separator' },
-        { label: 'Light Theme', click: () => dispatchAction('theme-light') },
-        { label: 'Dark Theme', click: () => dispatchAction('theme-dark') },
-        { label: 'System Theme', click: () => dispatchAction('theme-system') },
+        { label: t('lightTheme'), click: () => dispatchAction('theme-light') },
+        { label: t('darkTheme'), click: () => dispatchAction('theme-dark') },
+        { label: t('systemTheme'), click: () => dispatchAction('theme-system') },
         { type: 'separator' },
-        { label: 'Toggle Session Sidebar', accelerator: 'Ctrl+Alt+L', click: () => dispatchAction('toggle-sidebar') },
-        { label: 'Toggle Memory Debug', accelerator: 'Ctrl+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
+        { label: t('toggleSessionSidebar'), accelerator: 'Ctrl+Alt+L', click: () => dispatchAction('toggle-sidebar') },
+        { label: t('toggleMemoryDebug'), accelerator: 'Ctrl+Shift+D', click: () => dispatchAction('toggle-memory-debug') },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
       ],
     },
     {
-      label: 'Go',
+      label: t('go'),
       submenu: [
-        { label: 'Back', accelerator: 'Ctrl+[', click: () => dispatchAction('go-back') },
-        { label: 'Forward', accelerator: 'Ctrl+]', click: () => dispatchAction('go-forward') },
+        { label: t('back'), accelerator: 'Ctrl+[', click: () => dispatchAction('go-back') },
+        { label: t('forward'), accelerator: 'Ctrl+]', click: () => dispatchAction('go-forward') },
         { type: 'separator' },
-        { label: 'Previous Session', accelerator: 'Alt+Up', click: () => dispatchAction('previous-session') },
-        { label: 'Next Session', accelerator: 'Alt+Down', click: () => dispatchAction('next-session') },
+        { label: t('previousSession'), accelerator: 'Alt+Up', click: () => dispatchAction('previous-session') },
+        { label: t('nextSession'), accelerator: 'Alt+Down', click: () => dispatchAction('next-session') },
         { type: 'separator' },
-        { label: 'Previous Project', accelerator: 'Ctrl+Alt+Up', click: () => dispatchAction('previous-project') },
-        { label: 'Next Project', accelerator: 'Ctrl+Alt+Down', click: () => dispatchAction('next-project') },
+        { label: t('previousProject'), accelerator: 'Ctrl+Alt+Up', click: () => dispatchAction('previous-project') },
+        { label: t('nextProject'), accelerator: 'Ctrl+Alt+Down', click: () => dispatchAction('next-project') },
       ],
     },
     {
-      label: 'Window',
+      label: t('window'),
       submenu: [
-        { role: 'minimize' },
-        { label: 'Zoom In', accelerator: 'Ctrl+=', click: () => dispatchAction('zoom-in') },
-        { label: 'Zoom Out', accelerator: 'Ctrl+-', click: () => dispatchAction('zoom-out') },
-        { label: 'Reset Zoom', accelerator: 'Ctrl+0', click: () => dispatchAction('zoom-reset') },
-        { role: 'togglefullscreen' },
+        roleItem('minimize', 'minimize'),
+        { label: t('zoomIn'), accelerator: 'Ctrl+=', click: () => dispatchAction('zoom-in') },
+        { label: t('zoomOut'), accelerator: 'Ctrl+-', click: () => dispatchAction('zoom-out') },
+        { label: t('resetZoom'), accelerator: 'Ctrl+0', click: () => dispatchAction('zoom-reset') },
+        roleItem('togglefullscreen', 'toggleFullScreen'),
         { type: 'separator' },
-        { role: 'close' },
+        { label: t('close'), accelerator: 'CmdOrCtrl+W', click: closeTabOrWindow },
       ],
     },
     {
-      label: 'Help',
+      label: t('help'),
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'Ctrl+.', click: () => dispatchAction('help-dialog') },
-        { label: 'Show Diagnostics', accelerator: 'Ctrl+Shift+L', click: () => dispatchAction('download-logs') },
+        { label: t('keyboardShortcuts'), accelerator: 'Ctrl+.', click: () => dispatchAction('help-dialog') },
+        { label: t('showDiagnostics'), accelerator: 'Ctrl+Shift+L', click: () => dispatchAction('download-logs') },
         { type: 'separator' },
-        { label: 'Clear Cache', click: () => void handleInvoke(null, 'desktop_clear_cache') },
+        { label: t('clearCache'), click: () => void handleInvoke(null, 'desktop_clear_cache') },
         { type: 'separator' },
-        { label: 'Report a Bug', click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
-        { label: 'Discuss an Idea', click: () => shell.openExternal(GITHUB_IDEAS_URL) },
+        { label: t('reportABug'), click: () => shell.openExternal(GITHUB_BUG_REPORT_URL) },
+        { label: t('discussAnIdea'), click: () => shell.openExternal(GITHUB_IDEAS_URL) },
         { type: 'separator' },
-        { label: 'Join Discord', click: () => shell.openExternal(DISCORD_INVITE_URL) },
+        { label: t('joinDiscord'), click: () => shell.openExternal(DISCORD_INVITE_URL) },
       ],
     },
   ]);
 };
 
+const { labels: contextMenuLabels, apply: setContextMenuLocale } = createContextMenuLabels();
+
 contextMenu({
+  labels: contextMenuLabels,
   showInspectElement: isDev,
   showSaveImageAs: true,
   showCopyImage: true,
@@ -4975,6 +5217,7 @@ const COMMANDS_SAFE_FOR_REMOTE = new Set([
   'desktop_new_window_for_host',
   'desktop_set_window_title',
   'desktop_set_window_theme',
+  'desktop_set_close_tab_target',
   'desktop_is_window_fullscreen',
   'desktop_start_window_drag',
   'desktop_minimize_current_window',
@@ -4992,8 +5235,10 @@ ipcMain.handle('openchamber:invoke', async (event, command, args) => {
     log.warn(`[ipc] rejected ${command} from non-local origin: ${event.sender?.getURL?.() || '(unknown)'}`);
     throw new Error('IPC not available for this origin');
   }
+  const local = isLocalSender(event.sender);
   const browserWindow = BrowserWindow.fromWebContents(event.sender);
-  return handleInvoke(browserWindow, command, args);
+  const result = await handleInvoke(browserWindow, command, args);
+  return !local && command === 'desktop_hosts_get' ? redactHostsConfigForRemote(result) : result;
 });
 
 ipcMain.handle('openchamber:dialog:open', async (event, options) => {
@@ -5394,6 +5639,7 @@ app.whenReady().then(async () => {
     Menu.setApplicationMenu(buildAutoHiddenMenu());
   }
   setupTray();
+  applyDesktopMiniChatGlobalShortcut();
 
   if ((process.platform === 'darwin' || process.platform === 'win32') && app.isPackaged) {
     const openAtLogin = loginItemSettings?.openAtLogin === true;

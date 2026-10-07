@@ -12,6 +12,7 @@ import { consumeTerminalThemeQueries, terminalThemeModeReport } from './theme-re
 import { buildTerminalShellLaunch, createTerminalShellResolver, normalizeTerminalShell } from './shells.js';
 import { stripAppImageArgv0Leak, stripAppImageLauncherEnv, resolvePosixPtyLaunch } from '../inherited-env.js';
 import { shutdownTerminalProcesses } from './shutdown.js';
+import { isOpaqueOriginRequest, isPasswordlessSocketOriginAllowed } from '../security/request-security.js';
 
 const MAX_SESSIONS = 20;
 const MAX_HISTORY_BYTES = 512 * 1024;
@@ -93,6 +94,7 @@ export function createTerminalRuntime({
   app, server, fs, path, uiAuthController, buildAugmentedPath, searchPathFor, isExecutable,
   isRequestOriginAllowed, rejectWebSocketUpgrade, TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS,
   loadPtyProvider, terminalTerminationGraceMs = TERMINATION_GRACE_MS, shutdownProcesses = shutdownTerminalProcesses,
+  environmentRuntime = null,
 }) {
   const sessions = new Map();
   const pendingSessionCreates = new Map();
@@ -121,10 +123,16 @@ export function createTerminalRuntime({
   const spawnPty = async ({ cwd, cols, rows, themeMode, shell, loginShell, mode, command }) => {
     const provider = await getPtyProvider();
     const resolvedShell = await shellResolver.resolve(shell);
+    // The user's and the project's variables go under the terminal's own TERM
+    // settings and the host-private removals below.
+    const hostEnv = { ...process.env, PATH: buildAugmentedPath() };
+    // Opening a terminal or running a project action is the user's own act,
+    // so it may run the project's environment command.
+    const inheritedEnv = environmentRuntime ? await environmentRuntime.applyToDirectory(cwd, hostEnv, { refresh: true }) : hostEnv;
     let lastError = null;
     for (const executable of resolvedShell.executables) {
       try {
-        const env = { ...process.env, PATH: buildAugmentedPath(), TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: themeMode === 'light' ? '0;15' : '15;0' };
+        const env = { ...inheritedEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: themeMode === 'light' ? '0;15' : '15;0' };
         // The daemon's IPC fd is closed inside the PTY; an inherited NODE_CHANNEL_FD
         // (even an empty one) makes Node CLIs warn about an unparsable IPC channel.
         delete env.NODE_CHANNEL_FD;
@@ -419,7 +427,14 @@ export function createTerminalRuntime({
         }).catch(() => rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'));
       } catch { rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); }
     };
-    if (!uiAuthController?.enabled) { accept(); return; }
+    if (isOpaqueOriginRequest(req)) { rejectWebSocketUpgrade(socket, 403, 'Invalid origin'); return; }
+    if (!uiAuthController?.enabled) {
+      void isPasswordlessSocketOriginAllowed(req, isRequestOriginAllowed).then((allowed) => {
+        if (allowed) accept();
+        else rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
+      }).catch(() => rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'));
+      return;
+    }
     try {
       const result = uiAuthController.ensureSessionToken(req, null);
       if (!(result instanceof Promise)) {

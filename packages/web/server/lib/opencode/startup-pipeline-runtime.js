@@ -53,6 +53,7 @@ export const createStartupPipelineRuntime = (dependencies) => {
       port,
       startupTunnelRequest,
       onTunnelReady,
+      onListenerReady,
       tunnelRuntimeContext,
       attachSignals,
       apiOnly,
@@ -133,6 +134,7 @@ export const createStartupPipelineRuntime = (dependencies) => {
       onTunnelReady,
       afterListening: async ({ activePort }) => {
         tunnelRuntimeContext.setActivePort(activePort);
+        if (onListenerReady) await onListenerReady();
         await bootstrapOpenCodeAtStartup();
       },
     });
