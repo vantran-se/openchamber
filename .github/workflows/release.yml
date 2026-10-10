@@ -76,14 +76,13 @@ jobs:
           npm pkg set dependencies.@openchamber/sdk="$SDK_VERSION"
           npm pkg set repository.type=git repository.url=git+https://github.com/vantran-se/openchamber.git
 
-      - name: Build web package
-        run: bun run build:web
-
-      - name: Pack web package once
+      - name: Build and pack web package once
         id: pack
         working-directory: packages/web
         run: |
-          tarball=$(bun pm pack)
+          bun run build
+          npm pack --ignore-scripts --json > pack-result.json
+          tarball=$(node -e "console.log(require('./pack-result.json')[0].filename)")
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
       - name: Publish package
