@@ -31,6 +31,7 @@ export const createServerStartupRuntime = (dependencies) => {
     bindHost,
     startupTunnelRequest,
     onTunnelReady,
+    afterListening,
   }) => {
     let activePort = port;
 
@@ -45,6 +46,30 @@ export const createServerStartupRuntime = (dependencies) => {
         try {
           const addressInfo = server.address();
           activePort = typeof addressInfo === 'object' && addressInfo ? addressInfo.port : port;
+          try {
+            await afterListening?.({ activePort, bindHost });
+          } catch (error) {
+            if (typeof process.send === 'function' && process.connected) {
+              const startupError = {
+                type: 'openchamber:error',
+                code: error?.code || 'WEB_STARTUP_ERROR',
+                message: error instanceof Error ? error.message : String(error),
+              };
+              if (error?.url) startupError.url = error.url;
+              await new Promise((resolveStartupError) => {
+                try {
+                  process.send(startupError, () => resolveStartupError());
+                } catch {
+                  resolveStartupError();
+                }
+              });
+            }
+            await new Promise((resolveClose) => {
+              server.close(() => resolveClose());
+              server.closeAllConnections?.();
+            });
+            throw error;
+          }
 
           if (typeof process.send === 'function') {
             if (!process.connected) {

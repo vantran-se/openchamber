@@ -2,9 +2,17 @@ import { readOpenCodeInfo, isSupportedOpenCodeVersion } from './compatibility.js
 export const createOpenCodeNetworkRuntime = (deps) => {
   const {
     state,
-    getOpenCodeAuthHeaders,
+    getOpenCodeBaseUrl,
+    getOpenCodeAuthHeaders: readOpenCodeAuthHeaders,
     configuredOpenCodeHostname = '127.0.0.1',
   } = deps;
+
+  const getOpenCodeAuthHeaders = () => Object.fromEntries(
+    Object.entries(readOpenCodeAuthHeaders?.() ?? {}).map(([key, value]) => [
+      key.toLowerCase() === 'authorization' ? 'Authorization' : key,
+      value,
+    ]),
+  );
 
   const resolveConnectHostname = () => {
     const raw = typeof configuredOpenCodeHostname === 'string' ? configuredOpenCodeHostname.trim() : '';
@@ -83,14 +91,14 @@ export const createOpenCodeNetworkRuntime = (deps) => {
   };
 
   const buildOpenCodeUrl = (path, prefixOverride) => {
-    if (!state.openCodePort) {
-      throw new Error('OpenCode port is not available');
+    const base = getOpenCodeBaseUrl?.() ?? state.openCodeBaseUrl;
+    if (!base && !state.openCodePort) {
+      throw new Error('OpenCode endpoint is not available');
     }
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    const prefix = normalizeApiPrefix(prefixOverride !== undefined ? prefixOverride : '');
-    const fullPath = `${prefix}${normalizedPath}`;
-    const base = state.openCodeBaseUrl ?? `http://${resolveConnectHostname()}:${state.openCodePort}`;
-    return `${base}${fullPath}`;
+    const prefix = normalizeApiPrefix(prefixOverride ?? '');
+    const fallback = `http://${resolveConnectHostname()}:${state.openCodePort}`;
+    return `${String(base ?? fallback).replace(/\/+$/, '')}${prefix}${normalizedPath}`;
   };
 
   const detectOpenCodeApiPrefix = () => {
@@ -107,6 +115,7 @@ export const createOpenCodeNetworkRuntime = (deps) => {
 
   return {
     waitForReady,
+    getOpenCodeAuthHeaders,
     normalizeApiPrefix,
     setDetectedOpenCodeApiPrefix,
     buildOpenCodeUrl,

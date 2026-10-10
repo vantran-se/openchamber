@@ -1,4 +1,4 @@
-export const CHAT_INPUT_EDITOR_SELECTOR = '[data-chat-input="true"] .cm-content';
+export const CHAT_INPUT_EDITOR_SELECTOR = '[data-chat-input="true"] .cm-content, [data-chat-input="true"] textarea';
 
 /**
  * Focuses the main chat's composer. A chat pinned in the side panel has a

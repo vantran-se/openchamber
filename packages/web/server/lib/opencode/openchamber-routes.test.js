@@ -83,7 +83,7 @@ beforeEach(() => {
   packageManager.detectPackageManagerDetails.mockReturnValue({
     packageManager: 'npm',
   });
-  packageManager.getUpdateCommand.mockReturnValue('npm install -g @openchamber/web@latest');
+  packageManager.getUpdateCommand.mockReturnValue('npm install -g @vantran-se/openchamber-web@latest');
 });
 
 afterEach(() => {
@@ -308,7 +308,7 @@ describe('OpenChamber foreground update route', () => {
       '--setenv=PATH=/home/syu/.npm-global/bin:/usr/bin:/bin',
       '/bin/sh',
       '-c',
-      "set -eu\nnpm install -g @openchamber/web@latest\nsystemctl --user restart 'openchamber@wsl.service'",
+      "set -eu\nnpm install -g @vantran-se/openchamber-web@latest\nsystemctl --user restart 'openchamber@wsl.service'",
     ], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -480,7 +480,7 @@ describe('OpenChamber web update route on Windows', () => {
     // The UI password is never part of the script or its log.
     expect(script).not.toContain('pa%');
     // A .cmd shim (npm, pnpm, yarn) must be `call`ed or the script ends there.
-    expect(lines).toContain('call npm install -g @openchamber/web@latest');
+    expect(lines).toContain('call npm install -g @vantran-se/openchamber-web@latest');
     expect(lines).toContain('ping -n 3 127.0.0.1 >nul');
     expect(lines.some((line) => line.startsWith('timeout '))).toBe(false);
     expect(lines).toContain('if %ERRORLEVEL% EQU 0 (');

@@ -12,10 +12,11 @@ import { resolveNpmRegistryRequest } from './opencode/npm-registry-config.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PACKAGE_NAME = '@openchamber/web';
+const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
-const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
+const GITHUB_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
+const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases';
+const UPSTREAM_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
 let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
@@ -98,7 +99,7 @@ async function resolveAndroidApkUrl(version, candidateUrl) {
   }
 
   try {
-    const response = await fetch(`${GITHUB_RELEASES_API_URL}/tags/v${version}`, {
+    const response = await fetch(`${UPSTREAM_RELEASES_API_URL}/tags/v${version}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'openchamber-update-check',
@@ -657,7 +658,7 @@ function isPackageInstalledWith(pm) {
 
 // npm, bun and yarn print `name@version`; pnpm separates the name and the
 // version with whitespace. An optional `v` covers yarn listing formats.
-const GLOBAL_VERSION_PATTERN = /@openchamber\/web[@\s]+v?(\d[\w.+-]*)/;
+const GLOBAL_VERSION_PATTERN = /(?:@vantran-se\/openchamber-web|@openchamber\/web)[@\s]+v?(\d[\w.+-]*)/;
 
 /**
  * Read the globally installed version of the package as reported by the

@@ -67,7 +67,7 @@ describe.skipIf(!PACKED_ENABLED)('development build inside a space: docker (live
     const installed = lock.packages['node_modules/@openchamber/sdk'];
     expect(installed.version).toBe(JSON.parse(sdk).version);
     expect(installed.resolved).toMatch(/^file:.*openchamber-sdk\.tgz$/);
-    expect(lock.packages['node_modules/@openchamber/web'].resolved).toMatch(/^file:.*openchamber-web\.tgz$/);
+    expect(lock.packages['node_modules/@vantran-se/openchamber-web'].resolved).toMatch(/^file:.*openchamber-web\.tgz$/);
   });
 
   it('leaves the tarballs out of the volume', async () => {

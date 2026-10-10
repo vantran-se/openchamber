@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-PACKAGE_NAME="@openchamber/web"
+PACKAGE_NAME="@vantran-se/openchamber-web"
 BIN_NAME="openchamber"
 MIN_NODE_MAJOR=24
 MIN_NODE_MINOR=14

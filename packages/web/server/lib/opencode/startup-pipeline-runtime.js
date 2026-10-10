@@ -135,14 +135,16 @@ export const createStartupPipelineRuntime = (dependencies) => {
       bindHost,
       startupTunnelRequest,
       onTunnelReady,
+      afterListening: async ({ activePort }) => {
+        tunnelRuntimeContext.setActivePort(activePort);
+        await onListenerReady?.({ activePort });
+        scheduleOpenCodeApiDetection();
+        await bootstrapOpenCodeAtStartup();
+      },
     });
     recordStartupPerformance('web.listener.ready', {
       durationMs: performance.now() - pipelineStartedAt,
     });
-    tunnelRuntimeContext.setActivePort(startupResult.activePort);
-    if (onListenerReady) await onListenerReady();
-    scheduleOpenCodeApiDetection();
-    void bootstrapOpenCodeAtStartup();
 
     serverStartupRuntime.attachProcessHandlers({ attachSignals });
 

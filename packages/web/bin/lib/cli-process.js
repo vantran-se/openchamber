@@ -60,6 +60,7 @@ function writeInstanceOptions(instanceFilePath, options, onNotice) {
       uiPassword: typeof options.uiPassword === 'string' ? options.uiPassword : undefined,
       hasUiPassword: typeof options.uiPassword === 'string',
       apiOnly: options.apiOnly === true,
+      startupService: process.env.OPENCHAMBER_STARTUP_SERVICE === '1',
       startedAt: Number.isFinite(options.startedAt) ? options.startedAt : Date.now(),
     };
     fs.writeFileSync(instanceFilePath, JSON.stringify(toStore, null, 2), { mode: 0o600 });
@@ -128,7 +129,7 @@ function isOpenchamberCmdline(cmdline) {
     return false;
   }
   // Every install path contains the "openchamber" segment — the npm package
-  // (@openchamber/web) and the source checkout both do, for the foreground
+  // (@vantran-se/openchamber-web) and the source checkout both do, for the foreground
   // (bin/cli.js) and daemon (server/index.js) entrypoints alike. Matching the
   // path segment (not a generic "cli.js") keeps a recycled stranger such as
   // "npm-cli.js" or "agentmemory" from being mistaken for us.

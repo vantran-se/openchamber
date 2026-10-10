@@ -16,18 +16,20 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     dispatchResultsRuntime,
     messageSearchRuntime,
     scheduledTasksRuntime,
+    globalEventHub,
     getHealthCheckInterval,
     clearHealthCheckInterval,
     getTerminalRuntime,
     setTerminalRuntime,
     getMessageStreamRuntime,
     setMessageStreamRuntime,
-    shouldSkipOpenCodeStop,
+    getOpenCodeConnectionKind,
     getOpenCodePort,
     getOpenCodeProcess,
     setOpenCodeProcess,
     killProcessOnPort,
     waitForPortRelease,
+    disposeSharedOpenCodeService,
     getServer,
     getUiAuthController,
     setUiAuthController,
@@ -70,7 +72,9 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     beginGuestServiceShutdown();
     syncToHmrState();
     console.log('Starting graceful shutdown...');
-    const exitProcess = typeof options.exitProcess === 'boolean' ? options.exitProcess : getExitOnShutdown();
+    const exitProcess = options.exitProcess === true || options.exitProcess === false
+      ? options.exitProcess
+      : getExitOnShutdown();
 
     // Both embedded stop() and daemon exits use this sequence. Close admission
     // synchronously above, then stop viewers before draining their services.
@@ -83,6 +87,7 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       () => getRelayService()?.stop(),
       () => getDictationRuntime()?.stop(),
       () => openCodeWatcherRuntime.stop(),
+      () => globalEventHub.stop(),
       () => sessionRuntime.dispose(),
       () => sessionAssistRuntime?.stop?.(),
       () => sessionWorkRuntime?.stop?.(),
@@ -127,7 +132,8 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       }
     }
 
-    if (!shouldSkipOpenCodeStop()) {
+    const connectionKind = getOpenCodeConnectionKind();
+    if (connectionKind === 'managed-owned') {
       const portToKill = getOpenCodePort();
       const openCodeProcess = getOpenCodeProcess();
 
@@ -145,8 +151,8 @@ export const createGracefulShutdownRuntime = (dependencies) => {
       if (!(await waitForPortRelease(portToKill, 5000))) {
         console.warn(`Timed out waiting for OpenCode port ${portToKill} to be released during shutdown`);
       }
-    } else {
-      console.log('Skipping OpenCode shutdown (external server)');
+    } else if (connectionKind === 'shared-local') {
+      await disposeSharedOpenCodeService();
     }
 
     const server = getServer();

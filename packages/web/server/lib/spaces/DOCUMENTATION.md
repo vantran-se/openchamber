@@ -148,7 +148,7 @@ A space downloads nothing to start. Its programs come from a tools volume: one v
 
 The volume is a plain npm project at `/opt/openchamber-tools`, with `package.json`, `node_modules`, and the binaries in `node_modules/.bin`. It is not a global install. A development build needs the local `@openchamber/sdk` tarball to win over the published package with the same version number. npm `overrides` in a project `package.json` does that. A `-g` install would pull the published sdk as a dependency of `web`.
 
-Contents: `@openchamber/web`, `@opencode/cli`, and `@opencode/plugin` at the version of `@opencode/cli`.
+Contents: `@vantran-se/openchamber-web`, `@opencode/cli`, and `@opencode/plugin` at the version of `@opencode/cli`.
 
 ### Sources and the key
 

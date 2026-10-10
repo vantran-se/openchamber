@@ -54,7 +54,13 @@ import {
   UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS,
 } from './lib/event-stream/index.js';
 import { createFsSearchRuntime as createFsSearchRuntimeFactory } from './lib/fs/search.js';
-import { createOpenCodeLifecycleRuntime } from './lib/opencode/lifecycle.js';
+import {
+  createOpenCodeLifecycleControls,
+  createOpenCodeLifecycleRuntime,
+  createOpenCodeRecoveryCallbacks,
+  createOpenCodeServerComposition,
+} from './lib/opencode/lifecycle.js';
+import { createSharedOpenCodeServiceRuntime } from './lib/opencode/shared-service-runtime.js';
 import { createOpenCodeEnvRuntime } from './lib/opencode/env-runtime.js';
 import { providedLoginShellEnvSnapshot } from './lib/opencode/login-shell-env.js';
 import { resolveOpenCodeEnvConfig } from './lib/opencode/env-config.js';
@@ -722,6 +728,8 @@ const initialOpenCodeAuthState = hmrStateRuntime.resolveOpenCodeAuthFromState({
 });
 let openCodeAuthPassword = initialOpenCodeAuthState.openCodeAuthPassword;
 let openCodeAuthSource = initialOpenCodeAuthState.openCodeAuthSource;
+let openCodeConnectionAdapter = null;
+let sharedOpenCodeServiceRuntime = null;
 
 // Sync helper - call after modifying any HMR state variable
 const syncToHmrState = () => {
@@ -802,7 +810,24 @@ const openCodeAuthStateRuntime = createOpenCodeAuthStateRuntime({
   syncToHmrState,
 });
 
-const getOpenCodeAuthHeaders = (...args) => openCodeAuthStateRuntime.getOpenCodeAuthHeaders(...args);
+const getManagedOpenCodeAuthHeaders = (...args) => openCodeAuthStateRuntime.getOpenCodeAuthHeaders(...args);
+const getConnectionOpenCodeAuthHeaders = (...args) => (
+  openCodeConnectionAdapter?.getOpenCodeAuthHeaders(...args) ?? getManagedOpenCodeAuthHeaders(...args)
+);
+const getOpenCodeAuthHeaders = (...args) => getConnectionOpenCodeAuthHeaders(...args);
+const getOpenCodeBaseUrl = () => openCodeConnectionAdapter?.getOpenCodeBaseUrl() ?? openCodeBaseUrl;
+const getOpenCodeConnectionKind = () => (
+  openCodeConnectionAdapter?.getOpenCodeConnectionKind() ?? 'managed-owned'
+);
+const ownsOpenCodeProcess = () => openCodeConnectionAdapter?.ownsOpenCodeProcess() ?? true;
+const setSharedOpenCodeConnection = (connection) => {
+  openCodeBaseUrl = connection.endpoint.url;
+  const parsedUrl = new URL(connection.endpoint.url);
+  const parsedPort = parsedUrl.port
+    ? Number.parseInt(parsedUrl.port, 10)
+    : (parsedUrl.protocol === 'https:' ? 443 : 80);
+  openCodePort = Number.isFinite(parsedPort) ? parsedPort : null;
+};
 const isOpenCodeConnectionSecure = (...args) => openCodeAuthStateRuntime.isOpenCodeConnectionSecure(...args);
 const ensureLocalOpenCodeServerPassword = (...args) => openCodeAuthStateRuntime.ensureLocalOpenCodeServerPassword(...args);
 
@@ -817,7 +842,8 @@ Object.defineProperties(openCodeNetworkState, {
 
 const openCodeNetworkRuntime = createOpenCodeNetworkRuntime({
   state: openCodeNetworkState,
-  getOpenCodeAuthHeaders,
+  getOpenCodeBaseUrl,
+  getOpenCodeAuthHeaders: getConnectionOpenCodeAuthHeaders,
   configuredOpenCodeHostname: ENV_CONFIGURED_OPENCODE_HOSTNAME,
 });
 
@@ -1250,7 +1276,7 @@ const serverUtilsRuntime = createServerUtilsRuntime({
   longRequestTimeoutMs: LONG_REQUEST_TIMEOUT_MS,
   getRuntime: () => ({
     openCodePort,
-    openCodeBaseUrl,
+    openCodeBaseUrl: getOpenCodeBaseUrl(),
     openCodeNotReadySince,
     isOpenCodeReady,
     isRestartingOpenCode,
@@ -1420,6 +1446,19 @@ Object.defineProperties(openCodeLifecycleState, {
   resolvedWslDistro: { get: () => resolvedWslDistro, set: (value) => { resolvedWslDistro = value; } },
 });
 
+const openCodeRecoveryCallbacks = createOpenCodeRecoveryCallbacks({
+  resetOpenCodeRuntimeProviders,
+  rebindUpstream: () => {
+    if (messageStreamRuntime) {
+      messageStreamRuntime.rebindUpstream();
+    } else {
+      globalMessageStreamHub.rebind();
+    }
+  },
+  interruptBusySessionsAfterRestart: () => sessionRuntime.interruptBusySessionsAfterRestart(),
+  broadcastUiNotification,
+});
+
 const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   state: openCodeLifecycleState,
   env: {
@@ -1536,6 +1575,14 @@ const getOpenCodeCompatibility = async () => {
 };
 
 const getOpenCodeUpgradeCapability = () => {
+  if (getOpenCodeConnectionKind() === 'shared-local') {
+    return resolveOpenCodeUpgradeCapability({
+      isExternal: true,
+      hasManagedProcess: false,
+      activeBinary: null,
+      isBundledBinary: isBundledOpenCodeCliPath,
+    });
+  }
   const activeBinary = lastOpenCodeLaunchDiagnostics?.sourceBinary
     || lastOpenCodeLaunchDiagnostics?.binary
     || resolvedOpencodeBinary;
@@ -1548,12 +1595,19 @@ const getOpenCodeUpgradeCapability = () => {
   });
 };
 
-const restartOpenCode = (...args) => openCodeLifecycleRuntime.restartOpenCode(...args);
+const openCodeLifecycleControls = createOpenCodeLifecycleControls({
+  getKind: getOpenCodeConnectionKind,
+  restartLifecycle: (...args) => openCodeLifecycleRuntime.restartOpenCode(...args),
+  triggerLifecycleHealthCheck: (...args) => openCodeLifecycleRuntime.triggerHealthCheck(...args),
+  recoverShared: () => sharedOpenCodeServiceRuntime.recover(),
+  onSharedRecovered: openCodeRecoveryCallbacks.onSharedRecovered,
+});
+const restartOpenCode = (...args) => openCodeLifecycleControls.restart(...args);
 const waitForOpenCodeReady = (...args) => openCodeLifecycleRuntime.waitForOpenCodeReady(...args);
 const waitForAgentPresence = (...args) => openCodeLifecycleRuntime.waitForAgentPresence(...args);
 const refreshOpenCodeAfterConfigChange = (...args) => openCodeLifecycleRuntime.refreshOpenCodeAfterConfigChange(...args);
 const startHealthMonitoring = () => openCodeLifecycleRuntime.startHealthMonitoring(HEALTH_CHECK_INTERVAL);
-const triggerHealthCheck = () => openCodeLifecycleRuntime.triggerHealthCheck();
+const triggerHealthCheck = (...args) => openCodeLifecycleControls.triggerHealthCheck(...args);
 const scheduledChatsScope = createChatsScope(OPENCHAMBER_CHATS_DIR);
 const scheduledTasksRuntime = createScheduledTasksRuntime({
   projectConfigRuntime,
@@ -1811,9 +1865,19 @@ const ensureGlobalWatcherStarted = async () => {
   return globalWatcherStartPromise;
 };
 const bootstrapOpenCodeAtStartup = async (...args) => {
-  await openCodeLifecycleRuntime.bootstrapOpenCodeAtStartup(...args);
+  if (getOpenCodeConnectionKind() === 'shared-local') {
+    const connection = await sharedOpenCodeServiceRuntime.connect();
+    setSharedOpenCodeConnection(connection);
+    isOpenCodeReady = true;
+    isExternalOpenCode = true;
+    lastOpenCodeError = null;
+    openCodeNotReadySince = 0;
+    syncToHmrState();
+  } else {
+    await openCodeLifecycleRuntime.bootstrapOpenCodeAtStartup(...args);
+  }
   scheduleOpenCodeApiDetection();
-  if (openCodeLifecycleState.openCodeProcess && !openCodeLifecycleState.isExternalOpenCode) {
+  if (ownsOpenCodeProcess() && openCodeLifecycleState.openCodeProcess && !openCodeLifecycleState.isExternalOpenCode) {
     startHealthMonitoring();
   }
   // The global watcher used to start only for desktop notifications; the
@@ -1860,7 +1924,7 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   setMessageStreamRuntime: (value) => {
     messageStreamRuntime = value;
   },
-  shouldSkipOpenCodeStop: () => ENV_SKIP_OPENCODE_START || isExternalOpenCode,
+  shouldSkipOpenCodeStop: () => !ownsOpenCodeProcess(),
   getOpenCodePort: () => openCodePort,
   getOpenCodeProcess: () => openCodeProcess,
   setOpenCodeProcess: (value) => {
@@ -1907,7 +1971,6 @@ async function main(options = {}) {
     fsPromises,
     path,
     dataDir: OPENCHAMBER_DATA_DIR,
-    env: process.env,
     executeAction: (...args) => openChamberControlService.execute(...args),
     // A v2 tool call carries no directory, only the session it runs in.
     resolveSessionDirectory: (sessionID) => openChamberControlService.resolveSessionDirectory(sessionID),
@@ -1918,15 +1981,27 @@ async function main(options = {}) {
     // A pipe listener reports a string here, which has no address to bind back to.
     getActiveHost: () => server?.address?.()?.address ?? null,
   });
-  managedConfigRuntime = createManagedConfigRuntime({
-    fsPromises,
-    path,
-    dataDir: OPENCHAMBER_DATA_DIR,
-    env: process.env,
-    agentToolRuntime,
-    readSettings: () => readSettingsFromDiskMigrated(),
-    isAgentMemoryAvailable: isAgentMemoryFeatureAvailable,
+  const runtimeName = process.env.OPENCHAMBER_RUNTIME || 'web';
+  const openCodeComposition = createOpenCodeServerComposition({
+    runtime: runtimeName,
+    configuredHost: ENV_CONFIGURED_OPENCODE_HOST,
+    lifecycleMode: options.openCodeLifecycleMode,
+    createSharedRuntime: () => createSharedOpenCodeServiceRuntime({
+      ensureOptions: (() => {
+        const binary = ensureOpencodeCliEnv();
+        return binary ? { command: [binary, 'serve', '--service'] } : undefined;
+      })(),
+    }),
+    createManagedPluginRuntime: () => createManagedConfigRuntime({
+      fsPromises, path, dataDir: OPENCHAMBER_DATA_DIR, env: process.env, agentToolRuntime,
+      readSettings: () => readSettingsFromDiskMigrated(), isAgentMemoryAvailable: isAgentMemoryFeatureAvailable,
+    }),
+    getManagedBaseUrl: () => openCodeBaseUrl,
+    getManagedAuthHeaders: getManagedOpenCodeAuthHeaders,
   });
+  sharedOpenCodeServiceRuntime = openCodeComposition.sharedRuntime;
+  managedConfigRuntime = openCodeComposition.managedPluginRuntime;
+  openCodeConnectionAdapter = openCodeComposition.connection;
   await ensureChatsDir({ fsPromises, chatsDir: OPENCHAMBER_CHATS_DIR, warn: (message) => console.warn(`[data-dir] ${message}`) });
 
   // Pairing transports advertised to the create-device dialog. LAN reachability is
@@ -2207,7 +2282,7 @@ async function main(options = {}) {
   const bootstrapResult = bootstrapRuntime.setupBaseRoutes(app, {
     process,
     openchamberVersion: OPENCHAMBER_VERSION,
-    runtimeName: process.env.OPENCHAMBER_RUNTIME || 'web',
+    runtimeName,
     serverStartedAt,
     gracefulShutdown,
     getHealthSnapshot: () => {
@@ -2636,10 +2711,12 @@ async function main(options = {}) {
       scheduledTasks: scheduledTasksRuntime.getStatus(),
     }),
     isReady: () => isOpenCodeReady,
-    getManagedOpenCodePreflight: () => openCodeLifecycleRuntime.getManagedOpenCodePreflight(),
+    getManagedOpenCodePreflight: () => ownsOpenCodeProcess()
+      ? openCodeLifecycleRuntime.getManagedOpenCodePreflight()
+      : Promise.resolve(false),
     restartOpenCode: () => restartOpenCode(),
     getOpenCodeProcessInfo: () => {
-      const managed = Boolean((openCodeProcess || openCodePort) && !ENV_SKIP_OPENCODE_START && !isExternalOpenCode);
+      const managed = Boolean(ownsOpenCodeProcess() && (openCodeProcess || openCodePort) && !ENV_SKIP_OPENCODE_START && !isExternalOpenCode);
       // Only ever expose pid/port for a server WE manage. The Electron-side
       // killer kills by port (lsof + kill -KILL), so returning a port we don't
       // own — e.g. an external/desktop OpenCode on 4096 we attached to — would

@@ -13,7 +13,8 @@ const createRuntime = (overrides = {}) => createOpenCodeNetworkRuntime({
     openCodeApiDetectionTimer: null,
     ...overrides.state,
   },
-  getOpenCodeAuthHeaders: () => ({}),
+  getOpenCodeBaseUrl: overrides.getOpenCodeBaseUrl,
+  getOpenCodeAuthHeaders: overrides.getOpenCodeAuthHeaders ?? (() => ({})),
   configuredOpenCodeHostname: overrides.configuredOpenCodeHostname,
 });
 
@@ -46,6 +47,33 @@ describe('OpenCode network runtime', () => {
     });
 
     expect(runtime.buildOpenCodeUrl('/provider')).toBe('http://remote.example:4096/provider');
+  });
+
+  it('builds each request from the current shared-service base URL', () => {
+    let baseUrl = 'http://127.0.0.1:4096';
+    const runtime = createRuntime({
+      state: { openCodePort: null },
+      getOpenCodeBaseUrl: () => baseUrl,
+    });
+
+    expect(runtime.buildOpenCodeUrl('/api/session')).toBe('http://127.0.0.1:4096/api/session');
+    baseUrl = 'http://127.0.0.1:5096/';
+    expect(runtime.buildOpenCodeUrl('/api/session')).toBe('http://127.0.0.1:5096/api/session');
+  });
+
+  it('normalizes current service auth without dropping additional headers', () => {
+    let headers = { authorization: 'Basic first', 'x-service-header': 'one' };
+    const runtime = createRuntime({ getOpenCodeAuthHeaders: () => headers });
+
+    expect(runtime.getOpenCodeAuthHeaders()).toEqual({
+      Authorization: 'Basic first',
+      'x-service-header': 'one',
+    });
+    headers = { authorization: 'Basic replacement', 'x-service-header': 'two' };
+    expect(runtime.getOpenCodeAuthHeaders()).toEqual({
+      Authorization: 'Basic replacement',
+      'x-service-header': 'two',
+    });
   });
 
   it('normalizes wildcard and IPv6 OpenCode bind hosts for local connects', () => {

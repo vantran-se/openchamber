@@ -18,6 +18,8 @@ import React from 'react';
 
 import { isCapacitorApp, isIPadDevice } from '@/lib/platform';
 import type { ComposerEditorHandle } from '../editor/ComposerEditor';
+import { getMobileComposerViewportMode, isComposerObscured } from './mobileViewportPolicy';
+import { captureComposerAncestorScroll, createComposerScrollRestore } from './mobileViewportScroll';
 
 // Android mobile browsers are the pan-mode holdouts this pin exists for on
 // the CHAT screen too: interactive-widget=resizes-content is ignored by a
@@ -122,10 +124,39 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
     React.useLayoutEffect(() => {
         if (!isMobile || isCapacitorApp()) return;
         if (isFullscreen || !isFocused) return;
-        if (!isDraftScreen && !isAndroidBrowser()) return;
         const vv = window.visualViewport;
         const form = formRef.current;
         if (!vv || !form) return;
+        const mode = getMobileComposerViewportMode({
+            isDraftScreen,
+            isAndroidBrowser: isAndroidBrowser(),
+            isStandaloneBrowser: window.matchMedia?.('(display-mode: standalone)').matches === true,
+        });
+        if (mode === 'native') return;
+        if (mode === 'reveal-if-obscured') {
+            const ancestorScroll = captureComposerAncestorScroll(form);
+            const restore = createComposerScrollRestore(ancestorScroll, () => editorRef.current?.isFocused() === true, (callback) => window.setTimeout(callback, 350));
+            let didReveal = false;
+            const reveal = () => {
+                const formBottom = form.getBoundingClientRect().bottom;
+                if (isComposerObscured(formBottom, vv.offsetTop + vv.height, document.documentElement.clientHeight)) {
+                    didReveal = true;
+                    form.scrollIntoView({ block: 'end' });
+                }
+            };
+            reveal();
+            vv.addEventListener('resize', reveal);
+            vv.addEventListener('scroll', reveal);
+            window.addEventListener('resize', reveal);
+            window.addEventListener('scroll', reveal, true);
+            return () => {
+                vv.removeEventListener('resize', reveal);
+                vv.removeEventListener('scroll', reveal);
+                window.removeEventListener('resize', reveal);
+                window.removeEventListener('scroll', reveal, true);
+                if (didReveal) restore();
+            };
+        }
 
         // Keep the in-flow horizontal geometry (page paddings) while fixed.
         const rect = form.getBoundingClientRect();
@@ -163,7 +194,7 @@ export function useMobileViewportPin(options: MobileViewportPinOptions): void {
             cancelAnimationFrame(frame);
             releaseForm(form);
         };
-    }, [formRef, isDraftScreen, isFocused, isFullscreen, isMobile]);
+    }, [editorRef, formRef, isDraftScreen, isFocused, isFullscreen, isMobile]);
 
     // iPad Home Screen app: lift the composer by exactly the part the keyboard
     // covers. Past 768px an iPad is a tablet or desktop surface, so isMobile is

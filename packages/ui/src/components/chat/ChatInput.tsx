@@ -156,6 +156,8 @@ import {
     type ComposerChange,
     type ComposerEditorHandle,
 } from './composer/editor/ComposerEditor';
+import { ComposerEditorTextarea } from './composer/editor/ComposerEditorTextarea';
+import { shouldRenderNativeComposerTextarea } from './composer/editor/nativeTextarea';
 import { useComposerHeightLimit } from './composer/editor/useComposerHeightLimit';
 import { usePendingComposerText } from './composer/state/usePendingComposerText';
 import { createComposerEditorViewStore } from './composer/editor/viewStore';
@@ -597,6 +599,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         selections.saveAgentModelVariantForSession(btwComposerSessionId, agent, model.providerId, model.modelId, variant);
     }, [btwComposerSessionId, effectiveBtwSelection, isBtwActive]);
     const isMobile = useUIStore((state) => state.isMobile);
+    const useNativeComposerTextarea = shouldRenderNativeComposerTextarea(isMobile);
+    const ComposerEditorComponent = useNativeComposerTextarea ? ComposerEditorTextarea : ComposerEditor;
     const hasHardwareKeyboard = useHardwareKeyboard();
     const enterToSend = useUIStore((state) => state.enterToSend);
     const enterToSendConfigured = useUIStore((state) => state.enterToSendConfigured);
@@ -4223,9 +4227,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                                 }
                                 : undefined}
                         >
-                            <ComposerEditor
+                            <ComposerEditorComponent
                                 ref={composerRef}
-                                viewStore={composerViewStore}
+                                viewStore={useNativeComposerTextarea ? undefined : composerViewStore}
                                 data-testid="chat-input"
                                 value={message}
                                 languageContext={languageContext}

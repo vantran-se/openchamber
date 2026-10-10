@@ -52,7 +52,7 @@ describe('createRegistryToolsSource', () => {
     expect(JSON.parse(source.packageJson)).toEqual({
       name: 'openchamber-space-tools',
       private: true,
-      dependencies: { '@openchamber/web': '1.24.2', '@opencode/cli': '1.18.31', '@opencode/plugin': '1.18.31' },
+      dependencies: { '@vantran-se/openchamber-web': '1.24.2', '@opencode/cli': '1.18.31', '@opencode/plugin': '1.18.31' },
     });
   });
 
@@ -79,7 +79,7 @@ describe('createPackedToolsSource', () => {
       name: 'openchamber-space-tools',
       private: true,
       dependencies: {
-        '@openchamber/web': 'file:/tmp/openchamber-fill/openchamber-web.tgz',
+        '@vantran-se/openchamber-web': 'file:/tmp/openchamber-fill/openchamber-web.tgz',
         '@openchamber/sdk': 'file:/tmp/openchamber-fill/openchamber-sdk.tgz',
         '@opencode/cli': '1.18.31',
         '@opencode/plugin': '1.18.31',

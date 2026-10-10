@@ -56,7 +56,7 @@ const requireRevision = (value) => {
 const openCodePackages = (version) => ({ '@opencode/cli': version, '@opencode/plugin': version });
 
 /**
- * The versions a released host installs: its own `@openchamber/web`, and OpenCode at the
+ * The versions a released host installs: its own `@vantran-se/openchamber-web`, and OpenCode at the
  * version of the `@opencode/client` this server was built against.
  */
 export function readHostToolVersions(packageJsonUrl = new URL('../../../package.json', import.meta.url)) {
@@ -67,14 +67,14 @@ export function readHostToolVersions(packageJsonUrl = new URL('../../../package.
     throw new SpaceError('tools_versions_unreadable', `Could not read the package.json of the OpenChamber server: ${error.message}`);
   }
   return {
-    webVersion: requireVersion(manifest.version, '@openchamber/web'),
+    webVersion: requireVersion(manifest.version, '@vantran-se/openchamber-web'),
     openCodeVersion: requireVersion(manifest.dependencies?.['@opencode/client'], 'OpenCode'),
   };
 }
 
 export function createRegistryToolsSource({ webVersion, openCodeVersion, revision = '' }) {
   const packages = {
-    '@openchamber/web': requireVersion(webVersion, '@openchamber/web'),
+    '@vantran-se/openchamber-web': requireVersion(webVersion, '@vantran-se/openchamber-web'),
     ...openCodePackages(requireVersion(openCodeVersion, 'OpenCode')),
   };
   return finishSource({
@@ -110,7 +110,7 @@ export function createPackedToolsSource({ webTarballPath, sdkTarballPath, openCo
     canonical: { kind: 'packed', tarballs: files.map((file) => ({ name: file.name, sha256: sha256(file.bytes) })), packages, revision: requireRevision(revision) },
     packageJson: packageJsonText({
       dependencies: {
-        '@openchamber/web': `file:${TOOLS_STAGING_PATH}/${WEB_TARBALL_NAME}`,
+        '@vantran-se/openchamber-web': `file:${TOOLS_STAGING_PATH}/${WEB_TARBALL_NAME}`,
         '@openchamber/sdk': `file:${TOOLS_STAGING_PATH}/${SDK_TARBALL_NAME}`,
         ...packages,
       },

@@ -36,8 +36,14 @@ export const collectForwardProxyHeaders = (requestHeaders, authHeaders = {}) => 
     headers[normalizedKey] = Array.isArray(value) ? value.join(', ') : String(value);
   }
 
-  if (authHeaders.Authorization) {
-    headers.Authorization = authHeaders.Authorization;
+  for (const [key, value] of Object.entries(authHeaders || {})) {
+    if (value === undefined || value === null) continue;
+    const lowerKey = key.toLowerCase();
+    for (const existingKey of Object.keys(headers)) {
+      if (existingKey.toLowerCase() === lowerKey) delete headers[existingKey];
+    }
+    const normalizedKey = lowerKey === 'authorization' ? 'Authorization' : key;
+    headers[normalizedKey] = Array.isArray(value) ? value.join(', ') : String(value);
   }
 
   return headers;
