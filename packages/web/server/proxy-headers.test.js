@@ -28,6 +28,17 @@ describe('OpenCode proxy header handling', () => {
     expect(headers['authorization']).toBeUndefined();
   });
 
+  it('normalizes lowercase service authorization and preserves service headers', () => {
+    const headers = collectForwardProxyHeaders(
+      { authorization: 'Bearer oc_client_stale-ui-token' },
+      { authorization: 'Basic shared-service-token', 'x-service-header': 'service-value' },
+    );
+
+    expect(headers.Authorization).toBe('Basic shared-service-token');
+    expect(headers['authorization']).toBeUndefined();
+    expect(headers['x-service-header']).toBe('service-value');
+  });
+
   it('drops client authorization when upstream has no managed auth', () => {
     const headers = collectForwardProxyHeaders({
       accept: 'application/json',
@@ -37,6 +48,15 @@ describe('OpenCode proxy header handling', () => {
     expect(headers['authorization']).toBeUndefined();
     expect(headers.Authorization).toBeUndefined();
     expect(headers.accept).toBe('application/json');
+  });
+
+  it('lets trusted service headers replace browser headers case-insensitively', () => {
+    const headers = collectForwardProxyHeaders(
+      { 'x-service-header': 'browser-value' },
+      { 'X-Service-Header': 'trusted-value' },
+    );
+
+    expect(headers).toEqual({ 'X-Service-Header': 'trusted-value' });
   });
 
   it('drops content-encoding from forwarded response headers', () => {

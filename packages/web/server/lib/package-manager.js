@@ -12,13 +12,12 @@ import { resolveNpmRegistryRequest } from './opencode/npm-registry-config.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PACKAGE_NAME = '@openchamber/web';
+const PACKAGE_NAME = '@vantran-se/openchamber-web';
 const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
-const GITHUB_RELEASES_URL = 'https://github.com/openchamber/openchamber/releases';
-const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
-// The reason is kept with the package manager: a later call must still tell
-// a copy no package manager installed from one it did.
-let cachedDetection = null;
+const GITHUB_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
+const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases';
+const UPSTREAM_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
+let cachedDetectedPm = null;
 
 function getSpawnSyncBaseOptions() {
   return process.platform === 'win32' ? { windowsHide: true } : {};
@@ -100,7 +99,7 @@ async function resolveAndroidApkUrl(version, candidateUrl) {
   }
 
   try {
-    const response = await fetch(`${GITHUB_RELEASES_API_URL}/tags/v${version}`, {
+    const response = await fetch(`${UPSTREAM_RELEASES_API_URL}/tags/v${version}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'openchamber-update-check',
@@ -385,21 +384,6 @@ function packageManagerOwnsCurrentInstall(pm) {
   return false;
 }
 
-function describeDetection(packageManager, reason) {
-  return {
-    packageManager,
-    reason,
-    packagePath: getCurrentPackagePath(),
-    packageManagerCommand: resolvePackageManagerCommand(packageManager),
-    globalNodeModulesRoot: getGlobalNodeModulesRoots(packageManager)[0] || null,
-  };
-}
-
-function rememberDetection(packageManager, reason) {
-  cachedDetection = { packageManager, reason };
-  return describeDetection(packageManager, reason);
-}
-
 export function detectPackageManagerDetails() {
   // In desktop (Electron) runtime, package-manager detection is worthless —
   // the app ships as a .app bundle, not installed via npm/pnpm/yarn/bun, and
@@ -417,27 +401,55 @@ export function detectPackageManagerDetails() {
     };
   }
 
-  if (cachedDetection) {
-    return describeDetection(cachedDetection.packageManager, cachedDetection.reason);
+  if (cachedDetectedPm) {
+      return {
+        packageManager: cachedDetectedPm,
+        reason: 'cached',
+        packagePath: getCurrentPackagePath(),
+        packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+        globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+      };
   }
 
   const forcedPm = process.env.OPENCHAMBER_PACKAGE_MANAGER?.trim();
   if (forcedPm && ['npm', 'pnpm', 'yarn', 'bun'].includes(forcedPm)) {
-    if (isCommandAvailable(resolvePackageManagerCommand(forcedPm))) {
-      return rememberDetection(forcedPm, 'forced-env');
+    const forcedPmCommand = resolvePackageManagerCommand(forcedPm);
+    if (isCommandAvailable(forcedPmCommand)) {
+      cachedDetectedPm = forcedPm;
+      return {
+        packageManager: cachedDetectedPm,
+        reason: 'forced-env',
+        packagePath: getCurrentPackagePath(),
+        packageManagerCommand: forcedPmCommand,
+        globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+      };
     }
   }
 
   // First prefer the package manager that demonstrably owns the current install.
   const installPathPm = detectPackageManagerFromCurrentInstallPath();
   if (installPathPm && packageManagerOwnsCurrentInstall(installPathPm)) {
-    return rememberDetection(installPathPm, 'install-path-owner');
+    cachedDetectedPm = installPathPm;
+    return {
+      packageManager: cachedDetectedPm,
+      reason: 'install-path-owner',
+      packagePath: getCurrentPackagePath(),
+      packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+      globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+    };
   }
 
   const ownershipCandidates = ['pnpm', 'yarn', 'bun', 'npm'];
   for (const candidate of ownershipCandidates) {
     if (packageManagerOwnsCurrentInstall(candidate)) {
-      return rememberDetection(candidate, 'global-root-owner');
+      cachedDetectedPm = candidate;
+      return {
+        packageManager: cachedDetectedPm,
+        reason: 'global-root-owner',
+        packagePath: getCurrentPackagePath(),
+        packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+        globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+      };
     }
   }
 
@@ -470,12 +482,26 @@ export function detectPackageManagerDetails() {
 
   // Validate the hint against package visibility, but only after ownership checks failed.
   if (hintedPm && isCommandAvailable(resolvePackageManagerCommand(hintedPm)) && isPackageInstalledWith(hintedPm)) {
-    return rememberDetection(hintedPm, 'hinted-visible-install');
+    cachedDetectedPm = hintedPm;
+    return {
+      packageManager: cachedDetectedPm,
+      reason: 'hinted-visible-install',
+      packagePath: getCurrentPackagePath(),
+      packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+      globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+    };
   }
 
   const runtimePm = detectPackageManagerFromRuntimePath(process.execPath);
   if (runtimePm && isCommandAvailable(resolvePackageManagerCommand(runtimePm)) && isPackageInstalledWith(runtimePm)) {
-    return rememberDetection(runtimePm, 'runtime-visible-install');
+    cachedDetectedPm = runtimePm;
+    return {
+      packageManager: cachedDetectedPm,
+      reason: 'runtime-visible-install',
+      packagePath: getCurrentPackagePath(),
+      packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+      globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+    };
   }
 
   // Last resort: pick a PM that can at least see the package.
@@ -490,20 +516,26 @@ export function detectPackageManagerDetails() {
     if (check()) {
       // Verify this PM actually has the package installed globally
       if (isPackageInstalledWith(name)) {
-        return rememberDetection(name, 'last-resort-visible-install');
+        cachedDetectedPm = name;
+        return {
+          packageManager: cachedDetectedPm,
+          reason: 'last-resort-visible-install',
+          packagePath: getCurrentPackagePath(),
+          packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+          globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+        };
       }
     }
   }
 
-  // npm is only a guess from here on. A copy outside any node_modules folder
-  // (an unpacked tarball, the Docker image, a source checkout) was installed
-  // by no package manager at all, so no install command updates it.
-  return rememberDetection('npm', installPathPm ? 'default-fallback' : 'unmanaged-install');
-}
-
-/** The running copy was installed by no package manager, so it cannot update itself. */
-export function isUnmanagedInstall() {
-  return (cachedDetection ?? detectPackageManagerDetails()).reason === 'unmanaged-install';
+  cachedDetectedPm = 'npm';
+  return {
+    packageManager: cachedDetectedPm,
+    reason: 'default-fallback',
+    packagePath: getCurrentPackagePath(),
+    packageManagerCommand: resolvePackageManagerCommand(cachedDetectedPm),
+    globalNodeModulesRoot: getGlobalNodeModulesRoots(cachedDetectedPm)[0] || null,
+  };
 }
 
 export function detectPackageManager() {
@@ -626,7 +658,7 @@ function isPackageInstalledWith(pm) {
 
 // npm, bun and yarn print `name@version`; pnpm separates the name and the
 // version with whitespace. An optional `v` covers yarn listing formats.
-const GLOBAL_VERSION_PATTERN = /@openchamber\/web[@\s]+v?(\d[\w.+-]*)/;
+const GLOBAL_VERSION_PATTERN = /(?:@vantran-se\/openchamber-web|@openchamber\/web)[@\s]+v?(\d[\w.+-]*)/;
 
 /**
  * Read the globally installed version of the package as reported by the
@@ -658,21 +690,6 @@ function normalizeTargetVersion(value) {
   return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized) ? normalized : null;
 }
 
-// Dependencies whose install scripts pnpm 10+ blocks until approved. pnpm 11+
-// stops a global install in a terminal to ask about them. Keep in sync with
-// scripts/install.sh and with the "Ignored build scripts" list a fresh
-// `pnpm add -g @openchamber/web` prints.
-const PNPM_BUILD_DEPENDENCIES = ['msgpackr-extract', 'node-pty'];
-// First pnpm release that accepts `--allow-build`; older ones reject it as an
-// unknown option, and pnpm 9 and older run build scripts without approval.
-const PNPM_ALLOW_BUILD_MIN_VERSION = '10.4.0';
-
-function getPnpmAllowBuildFlags(pmCommand) {
-  const version = normalizeTargetVersion(getCommandOutput(pmCommand, ['--version']));
-  if (!version || compareVersions(version, PNPM_ALLOW_BUILD_MIN_VERSION) < 0) return '';
-  return PNPM_BUILD_DEPENDENCIES.map((name) => ` --allow-build=${name}`).join('');
-}
-
 /**
  * Get the update command for the detected package manager.
  * When an exact target version is given, it is pinned in the spec instead of
@@ -686,11 +703,10 @@ export function getUpdateCommand(pm = detectPackageManager(), options = {}) {
     throw new Error(`Invalid target version for update: ${String(options.targetVersion)}`);
   }
   const versionSpec = targetVersion ? `@${targetVersion}` : '@latest';
-  const resolvedCommand = resolvePackageManagerCommand(pm);
-  const pmCommand = quoteCommand(resolvedCommand);
+  const pmCommand = quoteCommand(resolvePackageManagerCommand(pm));
   switch (pm) {
     case 'pnpm':
-      return `${pmCommand} add -g${getPnpmAllowBuildFlags(resolvedCommand)} ${PACKAGE_NAME}${versionSpec}`;
+      return `${pmCommand} add -g ${PACKAGE_NAME}${versionSpec}`;
     case 'yarn':
       return `${pmCommand} global add ${PACKAGE_NAME}${versionSpec}`;
     case 'bun':

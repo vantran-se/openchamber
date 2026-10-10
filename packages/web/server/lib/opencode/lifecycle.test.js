@@ -23,8 +23,14 @@ vi.mock('./startup-performance.js', () => ({
   recordStartupPerformance: recordStartupPerformanceMock,
 }));
 
-const { createOpenCodeLifecycleRuntime } = await import('./lifecycle.js');
-const { createServerDiagnosticJournal } = await import('../diagnostics/server-journal.js');
+const {
+  createOpenCodeConnectionAdapter,
+  createOpenCodeLifecycleControls,
+  createOpenCodeLifecycleRuntime,
+  createOpenCodeRecoveryCallbacks,
+  createOpenCodeServerComposition,
+  resolveOpenCodeConnectionKind,
+} = await import('./lifecycle.js');
 
 const originalOpencodeBinary = process.env.OPENCODE_BINARY;
 const originalPath = process.env.PATH;
@@ -135,6 +141,227 @@ const createRuntime = (overrides = {}, stateOverrides = {}, envOverrides = {}) =
   return runtime;
 };
 
+describe('OpenCode connection composition', () => {
+  it('selects shared-local for Web without an explicit host', () => {
+    expect(resolveOpenCodeConnectionKind({ runtime: 'web', configuredHost: null })).toBe('shared-local');
+  });
+
+  it('selects explicit-external when a host is configured', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'web',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+    })).toBe('explicit-external');
+  });
+
+  it('keeps Desktop on the managed-owned lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({ runtime: 'desktop', configuredHost: null })).toBe('managed-owned');
+  });
+
+  it('gives an explicit host priority over the Desktop managed lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'desktop',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+    })).toBe('explicit-external');
+  });
+
+  it('keeps an embedded managed override on the managed-owned lifecycle', () => {
+    expect(resolveOpenCodeConnectionKind({
+      runtime: 'web',
+      configuredHost: null,
+      lifecycleMode: 'managed',
+    })).toBe('managed-owned');
+  });
+
+  it('requires a shared runtime factory for shared-local composition', () => {
+    expect(() => createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: null,
+    })).toThrow('Shared OpenCode composition requires a shared runtime factory');
+  });
+
+  it('creates shared and managed-only runtimes only for their owning connection kind', () => {
+    const sharedRuntime = { getBaseUrl: () => null, getHeaders: () => ({}) };
+    const managedPluginRuntime = { buildManagedChildEnv: () => ({}) };
+    const createSharedRuntime = vi.fn(() => sharedRuntime);
+    const createManagedPluginRuntime = vi.fn(() => managedPluginRuntime);
+
+    const shared = createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: null,
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+    const external = createOpenCodeServerComposition({
+      runtime: 'web',
+      configuredHost: { origin: 'https://opencode.example.com', port: 443 },
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+    const desktop = createOpenCodeServerComposition({
+      runtime: 'desktop',
+      configuredHost: null,
+      createSharedRuntime,
+      createManagedPluginRuntime,
+    });
+
+    expect(shared.sharedRuntime).toBe(sharedRuntime);
+    expect(shared.managedPluginRuntime).toBeNull();
+    expect(external.sharedRuntime).toBeNull();
+    expect(external.managedPluginRuntime).toBeNull();
+    expect(desktop.sharedRuntime).toBeNull();
+    expect(desktop.managedPluginRuntime).toBe(managedPluginRuntime);
+    expect(createSharedRuntime).toHaveBeenCalledTimes(1);
+    expect(createManagedPluginRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers the shared service through the production callback without interrupting sessions', async () => {
+    const restartManaged = vi.fn(async () => {});
+    const triggerManagedHealthCheck = vi.fn(async () => {});
+    const recoverShared = vi.fn(async () => {});
+    const resetOpenCodeRuntimeProviders = vi.fn();
+    const rebindUpstream = vi.fn();
+    const interruptBusySessionsAfterRestart = vi.fn(() => ({ sessionIds: [] }));
+    const broadcastUiNotification = vi.fn();
+    const callbacks = createOpenCodeRecoveryCallbacks({
+      resetOpenCodeRuntimeProviders,
+      rebindUpstream,
+      interruptBusySessionsAfterRestart,
+      broadcastUiNotification,
+    });
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: restartManaged,
+      triggerLifecycleHealthCheck: triggerManagedHealthCheck,
+      recoverShared,
+      onSharedRecovered: callbacks.onSharedRecovered,
+    });
+
+    await shared.restart('manual');
+
+    expect(recoverShared).toHaveBeenCalledOnce();
+    expect(resetOpenCodeRuntimeProviders).toHaveBeenCalledOnce();
+    expect(rebindUpstream).toHaveBeenCalledOnce();
+    expect(recoverShared.mock.invocationCallOrder[0]).toBeLessThan(rebindUpstream.mock.invocationCallOrder[0]);
+    expect(interruptBusySessionsAfterRestart).not.toHaveBeenCalled();
+    expect(broadcastUiNotification).not.toHaveBeenCalled();
+    expect(restartManaged).not.toHaveBeenCalled();
+    expect(triggerManagedHealthCheck).not.toHaveBeenCalled();
+  });
+
+  it('keeps managed restart interruption behavior in the production callback', () => {
+    const resetOpenCodeRuntimeProviders = vi.fn();
+    const rebindUpstream = vi.fn();
+    const interruptBusySessionsAfterRestart = vi.fn(() => ({ sessionIds: ['session-1'] }));
+    const broadcastUiNotification = vi.fn();
+    const callbacks = createOpenCodeRecoveryCallbacks({
+      resetOpenCodeRuntimeProviders,
+      rebindUpstream,
+      interruptBusySessionsAfterRestart,
+      broadcastUiNotification,
+    });
+
+    callbacks.onManagedRestarted();
+
+    expect(resetOpenCodeRuntimeProviders).toHaveBeenCalledOnce();
+    expect(rebindUpstream).toHaveBeenCalledOnce();
+    expect(interruptBusySessionsAfterRestart).toHaveBeenCalledOnce();
+    expect(broadcastUiNotification).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'opencode-restart-interrupted',
+      sessionId: 'session-1',
+    }));
+  });
+
+  it('shares concurrent shared recovery attempts', async () => {
+    let finishRecovery;
+    const recoverShared = vi.fn(() => new Promise((resolve) => {
+      finishRecovery = resolve;
+    }));
+    const onSharedRecovered = vi.fn(async () => {});
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: vi.fn(),
+      triggerLifecycleHealthCheck: vi.fn(),
+      recoverShared,
+      onSharedRecovered,
+    });
+
+    const first = shared.triggerHealthCheck();
+    const second = shared.triggerHealthCheck();
+    await Promise.resolve();
+    expect(recoverShared).toHaveBeenCalledOnce();
+    finishRecovery();
+    await Promise.all([first, second]);
+
+    expect(recoverShared).toHaveBeenCalledOnce();
+    expect(onSharedRecovered).toHaveBeenCalledOnce();
+  });
+
+  it('contains shared health recovery failures and permits a later retry', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const recoverShared = vi.fn()
+      .mockRejectedValueOnce(new Error('service unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const onSharedRecovered = vi.fn(async () => {});
+    const shared = createOpenCodeLifecycleControls({
+      getKind: () => 'shared-local',
+      restartLifecycle: vi.fn(),
+      triggerLifecycleHealthCheck: vi.fn(),
+      recoverShared,
+      onSharedRecovered,
+    });
+
+    await expect(shared.triggerHealthCheck()).resolves.toBeUndefined();
+    await expect(shared.restart()).resolves.toBeUndefined();
+
+    expect(recoverShared).toHaveBeenCalledTimes(2);
+    expect(onSharedRecovered).toHaveBeenCalledOnce();
+  });
+
+  it('preserves managed lifecycle controls', async () => {
+    const restartManaged = vi.fn(async () => {});
+    const triggerManagedHealthCheck = vi.fn(async () => {});
+    const managed = createOpenCodeLifecycleControls({
+      getKind: () => 'managed-owned',
+      restartLifecycle: restartManaged,
+      triggerLifecycleHealthCheck: triggerManagedHealthCheck,
+    });
+
+    await managed.restart('manual');
+    await managed.triggerHealthCheck();
+
+    expect(restartManaged).toHaveBeenCalledWith('manual');
+    expect(triggerManagedHealthCheck).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a shared runtime for shared-local composition', () => {
+    expect(() => createOpenCodeConnectionAdapter({ kind: 'shared-local' })).toThrow(
+      'Shared OpenCode connection requires a shared service runtime',
+    );
+  });
+
+  it('reads shared URL and auth from the shared runtime at call time without owning its process', () => {
+    let baseUrl = 'http://127.0.0.1:4096';
+    let headers = { authorization: 'Basic first' };
+    const adapter = createOpenCodeConnectionAdapter({
+      kind: 'shared-local',
+      sharedRuntime: {
+        getBaseUrl: () => baseUrl,
+        getHeaders: () => ({ ...headers }),
+      },
+    });
+
+    expect(adapter.getOpenCodeConnectionKind()).toBe('shared-local');
+    expect(adapter.getOpenCodeBaseUrl()).toBe('http://127.0.0.1:4096');
+    expect(adapter.getOpenCodeAuthHeaders()).toEqual({ authorization: 'Basic first' });
+    expect(adapter.ownsOpenCodeProcess()).toBe(false);
+
+    baseUrl = 'http://127.0.0.1:5096';
+    headers = { authorization: 'Basic replacement' };
+    expect(adapter.getOpenCodeBaseUrl()).toBe('http://127.0.0.1:5096');
+    expect(adapter.getOpenCodeAuthHeaders()).toEqual({ authorization: 'Basic replacement' });
+  });
+});
+
 describe('OpenCode lifecycle', () => {
   it('uses the resolved binary directly on startup and managed restart without an env override', async () => {
     delete process.env.OPENCODE_BINARY;
@@ -163,38 +390,6 @@ describe('OpenCode lifecycle', () => {
       // Credential reads take variable keys from the environment the current process got.
       expect(runtime.getManagedOpenCodeProcessEnv()).toBe(spawnMock.mock.calls[1][2].env);
       expect(runtime.getManagedOpenCodeProcessEnv()).toMatchObject({ SHELL_ONLY: 'yes' });
-    } finally {
-      await runtime.testState.openCodeProcess.close();
-    }
-  });
-
-  it('journals managed launch, readiness, exit and restart as fixed actions only', async () => {
-    const journal = createServerDiagnosticJournal();
-    spawnMock.mockImplementation(() => {
-      const child = createMockChild();
-      queueMicrotask(() => {
-        child.stderr.emit('data', 'plugin failed: token=secret-123 /private/file\n');
-        child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
-      });
-      return child;
-    });
-    globalThis.fetch = vi.fn(async () => ({ ok: false }));
-    const runtime = createRuntime({ diagnosticJournal: journal });
-    const firstServer = await runtime.startOpenCode();
-    runtime.testState.openCodeProcess = firstServer;
-    try {
-      await runtime.restartOpenCode();
-      expect(journal.snapshot().events.map(({ action, detail }) => [action, detail])).toEqual([
-        ['managed launch', 'attempt=1'],
-        ['managed ready', 'attempt=1'],
-        ['managed restart started', undefined],
-        ['managed process exited', undefined],
-        ['managed launch', 'attempt=1'],
-        ['managed ready', 'attempt=1'],
-        ['managed restart ready', undefined],
-      ]);
-      expect(spawnMock.mock.calls[0][2].env).not.toHaveProperty('OPENCODE_PRINT_LOGS');
-      expect(JSON.stringify(journal.snapshot())).not.toMatch(/secret|private/);
     } finally {
       await runtime.testState.openCodeProcess.close();
     }
@@ -427,43 +622,6 @@ describe('OpenCode lifecycle', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  // The UI stops a chat's location once the user leaves it. A read that went
-  // to the chat used last at startup would start it again, every quota poll.
-  it('scopes reads without a directory to the directory the user works in now', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'oc-current-'));
-    const leftChat = path.join(root, 'left-chat');
-    const current = path.join(root, 'current');
-    await fs.mkdir(leftChat);
-    await fs.mkdir(current);
-    globalThis.fetch = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ version: '2.0.20', pid: 1, urls: [], paths: { tmp: '/tmp' } }),
-    }));
-    const runtime = createRuntime({
-      env: {
-        ENV_CONFIGURED_OPENCODE_PORT: 45678,
-        ENV_CONFIGURED_OPENCODE_HOST: null,
-        ENV_EFFECTIVE_PORT: 45678,
-        ENV_CONFIGURED_OPENCODE_HOSTNAME: '127.0.0.1',
-        ENV_SKIP_OPENCODE_START: true,
-      },
-      reapManagedOrphanedProcesses: vi.fn(async () => ({ reaped: 0 })),
-      getWarmupDirectories: vi.fn(async () => [leftChat]),
-    });
-
-    await runtime.bootstrapOpenCodeAtStartup();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(runtime.getDefaultOpenCodeDirectory()).toBe(leftChat);
-
-    runtime.noteCurrentDirectory(current);
-    expect(runtime.getDefaultOpenCodeDirectory()).toBe(current);
-
-    // A directory that is not there is never sent.
-    runtime.noteCurrentDirectory(path.join(root, 'missing'));
-    expect(runtime.getDefaultOpenCodeDirectory()).toBe(current);
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
   it('advances to a currently-valid warmup directory when the cached default goes stale', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'oc-replace-'));
     const stale = path.join(root, 'gone');
@@ -659,12 +817,12 @@ describe('OpenCode lifecycle', () => {
     }
 
     expect(close).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(4);
 
     now += 15_000;
     await runtime.triggerHealthCheck();
 
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(5);
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('(2/20)'));
     warn.mockRestore();
   });

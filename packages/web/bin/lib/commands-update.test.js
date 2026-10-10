@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
 
-import { createUpdateCommand } from './commands-update.js';
+import { createUpdateCommand, partitionUpdateInstances } from './commands-update.js';
 
 async function withTempOpenChamberDataDir(fn) {
   const previous = process.env.OPENCHAMBER_DATA_DIR;
@@ -22,6 +22,19 @@ async function withTempOpenChamberDataDir(fn) {
 }
 
 describe('update command', () => {
+  it('leaves foreground service-manager instances running', () => {
+    const daemon = { port: 3000, instanceFilePath: '/daemon.json' };
+    const foreground = { port: 3069, instanceFilePath: '/foreground.json' };
+    const readOptions = vi.fn((filePath) => (
+      filePath === foreground.instanceFilePath ? { launchMode: 'foreground' } : { launchMode: 'daemon' }
+    ));
+
+    expect(partitionUpdateInstances([daemon, foreground], readOptions)).toEqual({
+      managed: [daemon],
+      foreground: [foreground],
+    });
+  });
+
   it('uses the package-manager helpers on the update-available path', async () => {
     await withTempOpenChamberDataDir(async () => {
       const originalWrite = process.stdout.write;
@@ -30,6 +43,7 @@ describe('update command', () => {
       const updateCommand = createUpdateCommand({
         packageManagerPath: '/fake/package-manager.js',
         serveCommand: vi.fn(),
+        getStartupStatus: vi.fn(() => ({ enabled: false })),
         importFromFilePath: vi.fn(async () => ({
           checkForUpdates: vi.fn(async () => ({ available: true, version: '9.9.9' })),
           detectPackageManager: vi.fn(() => 'npm'),
@@ -55,11 +69,12 @@ describe('update command', () => {
       const executeUpdate = vi.fn(() => ({
         success: false,
         exitCode: 0,
-        error: 'Installed @openchamber/web version 1.0.0 does not match target 9.9.9.',
+        error: 'Installed @vantran-se/openchamber-web version 1.0.0 does not match target 9.9.9.',
       }));
       const updateCommand = createUpdateCommand({
         packageManagerPath: '/fake/package-manager.js',
         serveCommand: vi.fn(),
+        getStartupStatus: vi.fn(() => ({ enabled: false })),
         importFromFilePath: vi.fn(async () => ({
           checkForUpdates: vi.fn(async () => ({ available: true, version: '9.9.9' })),
           detectPackageManager: vi.fn(() => 'npm'),

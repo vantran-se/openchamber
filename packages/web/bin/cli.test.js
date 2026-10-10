@@ -1054,8 +1054,8 @@ describe('cli entry detection', () => {
 
 describe('isOpenchamberCmdline', () => {
   it('accepts OpenChamber CLI and daemon cmdlines', () => {
-    expect(isOpenchamberCmdline('node /x/@openchamber/web/bin/cli.js serve')).toBe(true);
-    expect(isOpenchamberCmdline('node /x/@openchamber/web/server/index.js --port 9090')).toBe(true);
+    expect(isOpenchamberCmdline('node /x/@vantran-se/openchamber-web/bin/cli.js serve')).toBe(true);
+    expect(isOpenchamberCmdline('node /x/@vantran-se/openchamber-web/server/index.js --port 9090')).toBe(true);
     expect(isOpenchamberCmdline('bun /home/u/projects/openchamber/packages/web/server/index.js --port 3001')).toBe(true);
   });
 

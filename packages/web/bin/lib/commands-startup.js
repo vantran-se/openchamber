@@ -1,5 +1,5 @@
 import { EXIT_CODE, TunnelCliError } from './cli-errors.js';
-import { getStartupStatus, enableStartupService, disableStartupService } from './cli-startup.js';
+import { getStartupStatus, enableStartupService, disableStartupService, controlStartupService } from './cli-startup.js';
 import {
   intro as clackIntro,
   outro as clackOutro,
@@ -13,8 +13,9 @@ async function startupCommand(options, action = 'status', dependencies = {}) {
   const getStatus = dependencies.getStartupStatus || getStartupStatus;
   const enableService = dependencies.enableStartupService || enableStartupService;
   const disableService = dependencies.disableStartupService || disableStartupService;
+  const controlService = dependencies.controlStartupService || controlStartupService;
   const normalized = typeof action === 'string' ? action.trim().toLowerCase() : 'status';
-  if (!['status', 'enable', 'disable'].includes(normalized)) {
+  if (!['status', 'enable', 'disable', 'start', 'stop', 'restart'].includes(normalized)) {
     throw new TunnelCliError(
       `Unknown startup subcommand '${action}'. Use 'openchamber startup --help'.`,
       EXIT_CODE.USAGE_ERROR
@@ -26,6 +27,8 @@ async function startupCommand(options, action = 'status', dependencies = {}) {
     status = enableService(options);
   } else if (normalized === 'disable') {
     status = disableService();
+  } else if (normalized === 'start' || normalized === 'stop' || normalized === 'restart') {
+    status = controlService(normalized);
   } else {
     status = getStatus();
   }

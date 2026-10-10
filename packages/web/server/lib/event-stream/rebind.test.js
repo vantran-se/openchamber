@@ -132,6 +132,7 @@ describe('rebindUpstream (#2638)', () => {
     expect(fetchCalls).toBe(2);
     expect(fetchImpl.mock.calls[1][0]).toContain(':5000/api/event');
     expect(socket.sent.some((frame) => frame.type === 'event' && frame.eventId === 'evt-2')).toBe(true);
+    expect(socket.sent.filter((frame) => frame.type === 'ready' && frame.scope === 'global')).toHaveLength(2);
 
     socket.close();
     await runtime.close();
