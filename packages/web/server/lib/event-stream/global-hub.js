@@ -42,9 +42,9 @@ export function createGlobalMessageStreamHub({
 
   let controller = null;
   let reader = null;
+  let readerGeneration = 0;
   let connected = false;
   let everConnected = false;
-  let buildUrlFailed = false;
 
   const notifySubscriber = (kind, subscriber, payload) => {
     try {
@@ -132,8 +132,11 @@ export function createGlobalMessageStreamHub({
     }
 
     controller = new AbortController();
+    const generation = ++readerGeneration;
+    const currentController = controller;
+    let buildUrlFailed = false;
     reader = createUpstreamSseReader({
-      signal: controller.signal,
+      signal: currentController.signal,
       stallTimeoutMs: upstreamStallTimeoutMs,
       reconnectDelayMs: upstreamReconnectDelayMs,
       fetchImpl,
@@ -148,20 +151,23 @@ export function createGlobalMessageStreamHub({
       },
       getHeaders: getOpenCodeAuthHeaders,
       onConnect() {
+        if (generation !== readerGeneration) return;
         connected = true;
         const wasReady = everConnected;
         everConnected = true;
         notifyStatus({ type: 'connect', wasReady });
       },
       onDisconnect({ reason }) {
+        if (generation !== readerGeneration) return;
         connected = false;
         notifyStatus({ type: 'disconnect', reason });
       },
       onEvent(event) {
+        if (generation !== readerGeneration) return;
         coalescer.push(event);
       },
       onError(error) {
-        if (controller?.signal.aborted) {
+        if (generation !== readerGeneration || currentController.signal.aborted) {
           return;
         }
 
@@ -176,8 +182,9 @@ export function createGlobalMessageStreamHub({
     void reader.start();
   };
 
-  const stop = () => {
+  const stopReader = ({ resetConnectionHistory }) => {
     connected = false;
+    readerGeneration += 1;
     // Text that already arrived belongs in the retained replay suffix.
     coalescer.flush();
     reader?.stop();
@@ -186,13 +193,22 @@ export function createGlobalMessageStreamHub({
     }
     reader = null;
     controller = null;
-    everConnected = false;
-    buildUrlFailed = false;
+    if (resetConnectionHistory) {
+      everConnected = false;
+    }
+  };
+
+  const stop = () => {
+    stopReader({ resetConnectionHistory: true });
   };
 
   return {
     start,
     stop,
+    rebind() {
+      stopReader({ resetConnectionHistory: false });
+      start();
+    },
     isConnected() {
       return connected;
     },

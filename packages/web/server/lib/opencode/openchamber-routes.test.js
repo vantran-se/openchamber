@@ -12,7 +12,6 @@ vi.mock('../package-manager.js', () => ({
   checkForUpdates: vi.fn(),
   getUpdateCommand: vi.fn(),
   detectPackageManagerDetails: vi.fn(),
-  isUnmanagedInstall: vi.fn(),
 }));
 
 const childProcess = await import('child_process');
@@ -84,8 +83,7 @@ beforeEach(() => {
   packageManager.detectPackageManagerDetails.mockReturnValue({
     packageManager: 'npm',
   });
-  packageManager.getUpdateCommand.mockReturnValue('npm install -g @openchamber/web@latest');
-  packageManager.isUnmanagedInstall.mockReturnValue(false);
+  packageManager.getUpdateCommand.mockReturnValue('npm install -g @vantran-se/openchamber-web@latest');
 });
 
 afterEach(() => {
@@ -200,23 +198,6 @@ describe('OpenChamber desktop host update route', () => {
     expect(childProcess.spawnSync).not.toHaveBeenCalled();
   });
 
-  it('refuses a remote install the desktop host must run on its own screen, without restarting', async () => {
-    const desktopUpdater = {
-      check: vi.fn(),
-      install: vi.fn(async () => ({ available: true, version: '1.17.1', installBlocked: 'desktop-host' })),
-      restart: vi.fn(),
-    };
-    const { app } = createApp({ environment: { OPENCHAMBER_RUNTIME: 'desktop' }, desktopUpdater });
-
-    await request(app).post('/api/openchamber/update-install').expect(409, {
-      code: 'DESKTOP_UPDATE_LOCAL_ONLY',
-      error: 'Update OpenChamber on the computer it runs on.',
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(desktopUpdater.restart).not.toHaveBeenCalled();
-  });
-
   it('fails safely when the Electron updater bridge is unavailable', async () => {
     const { app } = createApp({
       environment: {
@@ -327,7 +308,7 @@ describe('OpenChamber foreground update route', () => {
       '--setenv=PATH=/home/syu/.npm-global/bin:/usr/bin:/bin',
       '/bin/sh',
       '-c',
-      "set -eu\nnpm install -g @openchamber/web@latest\nsystemctl --user restart 'openchamber@wsl.service'",
+      "set -eu\nnpm install -g @vantran-se/openchamber-web@latest\nsystemctl --user restart 'openchamber@wsl.service'",
     ], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -473,38 +454,6 @@ describe('OpenChamber foreground update route', () => {
   });
 });
 
-describe('OpenChamber update route for a copy no package manager installed', () => {
-  beforeEach(() => {
-    packageManager.isUnmanagedInstall.mockReturnValue(true);
-  });
-
-  it('marks an available update as blocked so clients show no Update button', async () => {
-    const { app } = createApp({ storedOptions: { launchMode: 'daemon' } });
-
-    const response = await request(app).get('/api/openchamber/update-check?appType=web').expect(200);
-
-    expect(response.body).toMatchObject({ available: true, installBlocked: 'manual-install' });
-  });
-
-  it('refuses the install instead of adding a global copy next to this one', async () => {
-    for (const environment of [{}, { CONTAINER: '1' }]) {
-      const { app } = createApp({ environment, storedOptions: { launchMode: 'daemon' } });
-
-      await request(app)
-        .post('/api/openchamber/update-install')
-        .expect(409, {
-          error: 'This copy can\'t update itself. Install the new version the way you installed it.',
-        });
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(packageManager.detectPackageManagerDetails).not.toHaveBeenCalled();
-    expect(packageManager.getUpdateCommand).not.toHaveBeenCalled();
-    expect(childProcess.spawn).not.toHaveBeenCalled();
-    expect(childProcess.spawnSync).not.toHaveBeenCalled();
-  });
-});
-
 describe('OpenChamber web update route on Windows', () => {
   it('runs the install-and-restart script from a batch file instead of a cmd.exe /c argument', async () => {
     const { app, dependencies } = createApp({
@@ -531,7 +480,7 @@ describe('OpenChamber web update route on Windows', () => {
     // The UI password is never part of the script or its log.
     expect(script).not.toContain('pa%');
     // A .cmd shim (npm, pnpm, yarn) must be `call`ed or the script ends there.
-    expect(lines).toContain('call npm install -g @openchamber/web@latest');
+    expect(lines).toContain('call npm install -g @vantran-se/openchamber-web@latest');
     expect(lines).toContain('ping -n 3 127.0.0.1 >nul');
     expect(lines.some((line) => line.startsWith('timeout '))).toBe(false);
     expect(lines).toContain('if %ERRORLEVEL% EQU 0 (');

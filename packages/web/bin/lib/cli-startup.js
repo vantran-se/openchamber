@@ -95,6 +95,7 @@ function collectStartupEnv(options = {}) {
       env.OPENCODE_BINARY = opencodeBinary.trim();
     }
   }
+  env.OPENCHAMBER_STARTUP_SERVICE = '1';
   const uiPassword = hasUiPasswordConfigured(options.uiPassword) ? options.uiPassword : undefined;
   if (uiPassword) {
     env.OPENCHAMBER_UI_PASSWORD = uiPassword;
@@ -165,7 +166,10 @@ function removeStartupEnvFile() {
 }
 
 const PNPM_STORE_SEGMENT = `${path.sep}.pnpm${path.sep}`;
-const PACKAGE_SEGMENT = `${path.sep}node_modules${path.sep}@openchamber${path.sep}web${path.sep}`;
+const PACKAGE_SEGMENTS = [
+  `${path.sep}node_modules${path.sep}@vantran-se${path.sep}openchamber-web${path.sep}`,
+  `${path.sep}node_modules${path.sep}@openchamber${path.sep}web${path.sep}`,
+];
 
 // pnpm keeps every installed version in its own store directory and links the
 // current one into node_modules. A startup service pointed at the store path
@@ -173,13 +177,15 @@ const PACKAGE_SEGMENT = `${path.sep}node_modules${path.sep}@openchamber${path.se
 function stablePnpmEntrypoint(resolved, exists = fs.existsSync) {
   const storeIndex = resolved.indexOf(PNPM_STORE_SEGMENT);
   if (storeIndex < 0) return null;
-  const packageIndex = resolved.indexOf(PACKAGE_SEGMENT, storeIndex);
-  if (packageIndex < 0) return null;
+  const packageMatch = PACKAGE_SEGMENTS
+    .map((segment) => ({ segment, index: resolved.indexOf(segment, storeIndex) }))
+    .find(({ index }) => index >= 0);
+  if (!packageMatch) return null;
   const stable = path.join(
     resolved.slice(0, storeIndex),
-    '@openchamber',
-    'web',
-    resolved.slice(packageIndex + PACKAGE_SEGMENT.length),
+    packageMatch.segment.includes('@vantran-se') ? '@vantran-se' : '@openchamber',
+    packageMatch.segment.includes('@vantran-se') ? 'openchamber-web' : 'web',
+    resolved.slice(packageMatch.index + packageMatch.segment.length),
   );
   return exists(stable) ? stable : null;
 }
@@ -355,6 +361,17 @@ function getUserLingerEnabled(user) {
   return parseLingerState(result.stdout);
 }
 
+function startupServicePort(servicePath) {
+  try {
+    const content = fs.readFileSync(servicePath, 'utf8');
+    const match = content.match(/(?:--port(?:&quot;|"|')?\s+(?:&quot;|"|')?|<string>--port<\/string>\s*<string>)(\d+)/);
+    const port = Number.parseInt(match?.[1] || '', 10);
+    return Number.isInteger(port) && port > 0 ? port : DEFAULT_PORT;
+  } catch {
+    return DEFAULT_PORT;
+  }
+}
+
 function getStartupStatus() {
   const paths = getStartupServicePaths();
   if (!paths.servicePath) {
@@ -362,7 +379,14 @@ function getStartupStatus() {
   }
   if (paths.platform === 'windows') {
     const result = runStartupCommand('schtasks.exe', ['/Query', '/TN', STARTUP_SERVICE_ID], { allowFailure: true });
-    return { supported: true, platform: paths.platform, enabled: result.status === 0, active: null, servicePath: paths.servicePath };
+    return {
+      supported: true,
+      platform: paths.platform,
+      enabled: result.status === 0,
+      active: null,
+      servicePath: paths.servicePath,
+      port: startupServicePort(getWindowsStartupWrapperPath()),
+    };
   }
   if (paths.platform === 'linux') {
     const enabledResult = runStartupCommand('systemctl', ['--user', 'is-enabled', 'openchamber.service'], { allowFailure: true });
@@ -376,6 +400,7 @@ function getStartupStatus() {
       active: activeState === 'active',
       activeState,
       servicePath: paths.servicePath,
+      port: startupServicePort(paths.servicePath),
       lingerEnabled: getUserLingerEnabled(lingerUser),
       lingerUser: lingerUser || null,
     };
@@ -386,6 +411,7 @@ function getStartupStatus() {
     enabled: fs.existsSync(paths.servicePath),
     active: null,
     servicePath: paths.servicePath,
+    port: startupServicePort(paths.servicePath),
   };
 }
 
@@ -456,6 +482,34 @@ function disableStartupService() {
   return getStartupStatus();
 }
 
+function controlStartupService(action) {
+  const status = getStartupStatus();
+  if (!status.supported || !status.enabled) {
+    throw new TunnelCliError('OpenChamber startup service is not installed.', EXIT_CODE.USAGE_ERROR);
+  }
+  if (!['start', 'stop', 'restart'].includes(action)) {
+    throw new TunnelCliError(`Unsupported startup service action: ${action}`, EXIT_CODE.USAGE_ERROR);
+  }
+  if (status.platform === 'linux') {
+    runStartupCommand('systemctl', ['--user', action, 'openchamber.service']);
+  } else if (status.platform === 'macos') {
+    const domain = `gui/${process.getuid()}`;
+    const target = `${domain}/${STARTUP_SERVICE_ID}`;
+    if (action === 'stop') {
+      runStartupCommand('/bin/launchctl', ['bootout', target], { allowFailure: true });
+    } else {
+      runStartupCommand('/bin/launchctl', ['bootout', target], { allowFailure: true });
+      runStartupCommand('/bin/launchctl', ['bootstrap', domain, status.servicePath]);
+      runStartupCommand('/bin/launchctl', ['kickstart', '-k', target]);
+    }
+  } else if (status.platform === 'windows') {
+    if (action !== 'start') runStartupCommand('schtasks.exe', ['/End', '/TN', STARTUP_SERVICE_ID], { allowFailure: true });
+    if (action !== 'stop') runStartupCommand('schtasks.exe', ['/Run', '/TN', STARTUP_SERVICE_ID]);
+  }
+  return getStartupStatus();
+}
+
+const restartStartupService = () => controlStartupService('restart');
 
 export {
   stablePnpmEntrypoint,
@@ -463,5 +517,7 @@ export {
   getStartupStatus,
   enableStartupService,
   disableStartupService,
+  controlStartupService,
+  restartStartupService,
   buildWindowsStartupTaskCommand,
 };
