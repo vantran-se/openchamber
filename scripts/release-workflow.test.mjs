@@ -13,8 +13,9 @@ test('release workflow publishes only the fork web package', () => {
   assert.match(run('Set fork package metadata'), /@vantran-se\/openchamber-web/);
   assert.doesNotMatch(run('Set fork package metadata'), /@openchamber\/sdk.*workspace|@opencode/);
   assert.match(run('Resolve published SDK version'), /npm view @openchamber\/sdk version/);
-  assert.match(run('Pack web package once'), /bun pm pack/);
-  assert.equal(run('Pack web package once').match(/bun pm pack/g)?.length, 1);
+  assert.match(run('Build and pack web package once'), /bun run build/);
+  assert.match(run('Build and pack web package once'), /npm pack --ignore-scripts --json/);
+  assert.equal(run('Build and pack web package once').match(/npm pack/g)?.length, 1);
 });
 
 test('release version drives the package manifest and exact tarball publication', () => {
