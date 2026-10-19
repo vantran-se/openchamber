@@ -204,7 +204,7 @@ export const ComposerEditorTextarea = React.forwardRef<ComposerEditorHandle, Com
                     onBlur={onBlur}
                     onPaste={(event) => onPaste?.(event.nativeEvent)}
                     className={cn(
-                        'block min-h-full w-full resize-none overflow-x-hidden bg-transparent p-0 pl-px font-[inherit] text-[inherit] leading-[inherit] text-foreground outline-none placeholder:text-muted-foreground',
+                        'block min-h-full w-full resize-none overflow-x-hidden bg-transparent p-0 ps-px font-[inherit] text-[inherit] leading-[inherit] text-foreground outline-none placeholder:text-muted-foreground',
                         fillContainer && 'flex-1',
                         contentClassName,
                     )}
