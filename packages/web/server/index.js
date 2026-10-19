@@ -103,6 +103,7 @@ import { createChatsScope } from './lib/scheduled-tasks/chats-scope.js';
 import { createServerStartupRuntime } from './lib/opencode/server-startup-runtime.js';
 import { createTunnelWiringRuntime } from './lib/opencode/tunnel-wiring-runtime.js';
 import { createStartupPipelineRuntime } from './lib/opencode/startup-pipeline-runtime.js';
+import { prepareInstanceDir } from './lib/opencode/instance-dir.js';
 import { runCliEntryIfMain } from './lib/opencode/cli-entry-runtime.js';
 import { registerNotificationRoutes } from './lib/notifications/routes.js';
 import { createNotificationEmitterRuntime } from './lib/notifications/emitter-runtime.js';
@@ -1967,11 +1968,12 @@ async function main(options = {}) {
     || (typeof process.env.OPENCHAMBER_HOST === 'string' && process.env.OPENCHAMBER_HOST.trim().length > 0
       ? process.env.OPENCHAMBER_HOST.trim()
       : '127.0.0.1');
+  const instanceDir = await prepareInstanceDir({ fsPromises, path, dataDir: OPENCHAMBER_DATA_DIR });
   agentToolRuntime = createAgentToolRuntime({
     crypto,
     fsPromises,
     path,
-    dataDir: OPENCHAMBER_DATA_DIR,
+    instanceDir,
     executeAction: (...args) => openChamberControlService.execute(...args),
     // A v2 tool call carries no directory, only the session it runs in.
     resolveSessionDirectory: (sessionID) => openChamberControlService.resolveSessionDirectory(sessionID),
@@ -1994,7 +1996,7 @@ async function main(options = {}) {
       })(),
     }),
     createManagedPluginRuntime: () => createManagedConfigRuntime({
-      fsPromises, path, dataDir: OPENCHAMBER_DATA_DIR, env: process.env, agentToolRuntime,
+      fsPromises, path, instanceDir, env: process.env, agentToolRuntime,
       readSettings: () => readSettingsFromDiskMigrated(), isAgentMemoryAvailable: isAgentMemoryFeatureAvailable,
     }),
     getManagedBaseUrl: () => openCodeBaseUrl,
