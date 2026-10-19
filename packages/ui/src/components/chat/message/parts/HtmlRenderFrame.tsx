@@ -65,6 +65,9 @@ function useHtmlRenderTheme(): HtmlRenderTheme {
     // controls with it; read again whenever it changes.
     const interfaceSize = useUIStore((state) => state.fontSize);
     return React.useMemo(() => {
+        // Reading this value subscribes the hook to interface-size changes;
+        // the computed root styles below are the authoritative measurements.
+        void interfaceSize;
         // The user's font settings land on the root as these variables.
         const style = getComputedStyle(document.documentElement);
         const rem = Number.parseFloat(style.fontSize) || 16;
