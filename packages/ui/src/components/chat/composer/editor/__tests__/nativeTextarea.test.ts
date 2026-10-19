@@ -56,14 +56,10 @@ describe('textareaCaretCoords', () => {
         const win = new Window();
         Object.defineProperty(globalThis, 'document', { configurable: true, value: win.document });
         Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: win.getComputedStyle.bind(win) });
-        const textarea = {
-            value: 'hello',
-            selectionStart: 5,
-            selectionEnd: 5,
-            getBoundingClientRect: () => ({ top: 100, left: 20, width: 400, height: 80 }),
-            scrollTop: 0,
-            scrollLeft: 0,
-        } as unknown as HTMLTextAreaElement;
+        const textarea = document.createElement('textarea');
+        textarea.value = 'hello';
+        textarea.setSelectionRange(5, 5);
+        textarea.getBoundingClientRect = () => new win.DOMRect(20, 100, 400, 80);
         const coords = textareaCaretCoords(textarea);
         expect(coords).not.toBeNull();
         expect(coords?.left).toBeDefined();
