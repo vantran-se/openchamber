@@ -452,7 +452,7 @@ describe('getUpdateCommand', () => {
       for (const version of ['10.4.0', '10.34.6', '11.28.2', '12.11.2']) {
         stubPnpmVersion(`${version}\n`);
         expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe(
-          'pnpm add -g --allow-build=msgpackr-extract --allow-build=node-pty @openchamber/web@1.24.1',
+          'pnpm add -g --allow-build=msgpackr-extract --allow-build=node-pty @vantran-se/openchamber-web@1.24.1',
         );
       }
     });
@@ -460,10 +460,10 @@ describe('getUpdateCommand', () => {
     it('leaves the flag out where pnpm rejects it or the version is unknown', () => {
       for (const version of ['9.15.9', '10.3.0', '']) {
         stubPnpmVersion(`${version}\n`);
-        expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @openchamber/web@1.24.1');
+        expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @vantran-se/openchamber-web@1.24.1');
       }
       stubPnpmVersion('', 1);
-      expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @openchamber/web@1.24.1');
+      expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @vantran-se/openchamber-web@1.24.1');
     });
   });
 
