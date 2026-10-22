@@ -53,7 +53,7 @@ describe('createRegistryToolsSource', () => {
       name: 'openchamber-space-tools',
       private: true,
       // bun and pnpm ride along at exact versions, the runtimes setup commands reach for.
-      dependencies: { '@openchamber/web': '1.24.2', '@opencode/cli': '1.18.31', '@opencode/plugin': '1.18.31', bun: '1.4.4', pnpm: '12.11.2' },
+      dependencies: { '@vantran-se/openchamber-web': '1.24.2', '@opencode/cli': '1.18.31', '@opencode/plugin': '1.18.31', bun: '1.4.4', pnpm: '12.11.2' },
     });
   });
 
@@ -80,7 +80,7 @@ describe('createPackedToolsSource', () => {
       name: 'openchamber-space-tools',
       private: true,
       dependencies: {
-        '@openchamber/web': 'file:/tmp/openchamber-fill/openchamber-web.tgz',
+        '@vantran-se/openchamber-web': 'file:/tmp/openchamber-fill/openchamber-web.tgz',
         '@openchamber/sdk': 'file:/tmp/openchamber-fill/openchamber-sdk.tgz',
         '@opencode/cli': '1.18.31',
         '@opencode/plugin': '1.18.31',

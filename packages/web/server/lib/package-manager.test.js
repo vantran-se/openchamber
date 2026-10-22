@@ -103,7 +103,7 @@ describe('checkForUpdates', () => {
           releaseNotes: '## [1.10.0]\n\n- New',
         }),
       })
-      .when('mirror.example.com/npm/@openchamber%2Fweb', {
+      .when('mirror.example.com/npm/@vantran-se%2Fopenchamber-web', {
         ok: true,
         json: async () => ({
           'dist-tags': { latest: '1.10.0' },
@@ -120,7 +120,7 @@ describe('checkForUpdates', () => {
       expect(result.available).toBe(true);
       expect(result.version).toBe('1.10.0');
       expect(
-        fetchMock.mock.calls.some(([url]) => String(url) === 'https://mirror.example.com/npm/@openchamber%2Fweb'),
+        fetchMock.mock.calls.some(([url]) => String(url) === 'https://mirror.example.com/npm/@vantran-se%2Fopenchamber-web'),
       ).toBe(true);
     } finally {
       if (previousLower === undefined) delete process.env.npm_config_registry;
@@ -140,7 +140,7 @@ describe('checkForUpdates', () => {
         ok: true,
         json: async () => ({ latestVersion: '1.10.0', updateAvailable: true }),
       })
-      .when('mirror.example.com/npm/@openchamber%2Fweb', {
+      .when('mirror.example.com/npm/@vantran-se%2Fopenchamber-web', {
         ok: true,
         json: async () => ({ 'dist-tags': { latest: '1.10.0' } }),
       });
@@ -150,7 +150,7 @@ describe('checkForUpdates', () => {
       const npmCall = fetchMock.mock.calls.find(([url]) => String(url).includes('mirror.example.com'));
 
       expect(result.available).toBe(true);
-      expect(npmCall[0]).toBe('https://mirror.example.com/npm/@openchamber%2Fweb');
+      expect(npmCall[0]).toBe('https://mirror.example.com/npm/@vantran-se%2Fopenchamber-web');
       expect(npmCall[0]).not.toContain('test-password');
       expect(npmCall[1].headers.Authorization).toBe(`Basic ${Buffer.from('test-user:test-password').toString('base64')}`);
     } finally {
@@ -431,10 +431,10 @@ describe('getCurrentVersion', () => {
 
 describe('getUpdateCommand', () => {
   it('pins the exact target version instead of re-resolving the latest dist-tag', () => {
-    expect(getUpdateCommand('npm', { targetVersion: '1.24.1' })).toBe('npm install -g @openchamber/web@1.24.1');
-    expect(getUpdateCommand('pnpm', { targetVersion: 'v1.24.1' })).toBe('pnpm add -g @openchamber/web@1.24.1');
-    expect(getUpdateCommand('yarn', { targetVersion: '1.24.1' })).toBe('yarn global add @openchamber/web@1.24.1');
-    expect(getUpdateCommand('bun', { targetVersion: '1.25.0-beta.1' })).toContain('add -g @openchamber/web@1.25.0-beta.1');
+    expect(getUpdateCommand('npm', { targetVersion: '1.24.1' })).toBe('npm install -g @vantran-se/openchamber-web@1.24.1');
+    expect(getUpdateCommand('pnpm', { targetVersion: 'v1.24.1' })).toBe('pnpm add -g @vantran-se/openchamber-web@1.24.1');
+    expect(getUpdateCommand('yarn', { targetVersion: '1.24.1' })).toBe('yarn global add @vantran-se/openchamber-web@1.24.1');
+    expect(getUpdateCommand('bun', { targetVersion: '1.25.0-beta.1' })).toContain('add -g @vantran-se/openchamber-web@1.25.0-beta.1');
   });
 
   describe('pnpm build approvals', () => {
@@ -454,7 +454,7 @@ describe('getUpdateCommand', () => {
       for (const version of ['10.4.0', '10.34.6', '11.28.2', '12.11.2']) {
         stubPnpmVersion(`${version}\n`);
         expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe(
-          'pnpm add -g --allow-build=msgpackr-extract --allow-build=node-pty @openchamber/web@1.24.1',
+          'pnpm add -g --allow-build=msgpackr-extract --allow-build=node-pty @vantran-se/openchamber-web@1.24.1',
         );
       }
     });
@@ -462,15 +462,15 @@ describe('getUpdateCommand', () => {
     it('leaves the flag out where pnpm rejects it or the version is unknown', () => {
       for (const version of ['9.15.9', '10.3.0', '']) {
         stubPnpmVersion(`${version}\n`);
-        expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @openchamber/web@1.24.1');
+        expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @vantran-se/openchamber-web@1.24.1');
       }
       stubPnpmVersion('', 1);
-      expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @openchamber/web@1.24.1');
+      expect(getUpdateCommand('pnpm', { targetVersion: '1.24.1' })).toBe('pnpm add -g @vantran-se/openchamber-web@1.24.1');
     });
   });
 
   it('falls back to the latest dist-tag when no target version is given', () => {
-    expect(getUpdateCommand('npm')).toBe('npm install -g @openchamber/web@latest');
+    expect(getUpdateCommand('npm')).toBe('npm install -g @vantran-se/openchamber-web@latest');
   });
 
   it('rejects a target version that is not a concrete version', () => {
@@ -499,7 +499,7 @@ describe('executeUpdate', () => {
   });
 
   it('reports success when the installed version matches the target', () => {
-    stubSpawnSync({ listingStdout: '└── @openchamber/web@1.24.1' });
+    stubSpawnSync({ listingStdout: '└── @vantran-se/openchamber-web@1.24.1' });
     const result = executeUpdate('npm', { targetVersion: '1.24.1' });
     expect(result.success).toBe(true);
     expect(result.installedVersion).toBe('1.24.1');
@@ -513,7 +513,7 @@ describe('executeUpdate', () => {
   });
 
   it('fails when the package manager exits successfully but installed the wrong version', () => {
-    stubSpawnSync({ listingStdout: '└── @openchamber/web@1.19.0' });
+    stubSpawnSync({ listingStdout: '└── @vantran-se/openchamber-web@1.19.0' });
     const result = executeUpdate('npm', { targetVersion: '1.24.1' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('1.19.0');

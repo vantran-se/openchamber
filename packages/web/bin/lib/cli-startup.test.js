@@ -12,9 +12,12 @@ describe('stablePnpmEntrypoint', () => {
   const globalModules = join('/home/me', '.local', 'share', 'pnpm', 'global', '5', 'node_modules');
   const storeEntry = join(globalModules, '.pnpm', '@openchamber+web@2.1.0', 'node_modules', '@openchamber', 'web', 'bin', 'cli.js');
   const stableEntry = join(globalModules, '@openchamber', 'web', 'bin', 'cli.js');
+  const forkStoreEntry = join(globalModules, '.pnpm', '@vantran-se+openchamber-web@2.5.0', 'node_modules', '@vantran-se', 'openchamber-web', 'bin', 'cli.js');
+  const forkStableEntry = join(globalModules, '@vantran-se', 'openchamber-web', 'bin', 'cli.js');
 
-  it('maps a pnpm store path to the version-independent link', () => {
+  it('maps pnpm store paths for both package names to version-independent links', () => {
     expect(stablePnpmEntrypoint(storeEntry, (candidate) => candidate === stableEntry)).toBe(stableEntry);
+    expect(stablePnpmEntrypoint(forkStoreEntry, (candidate) => candidate === forkStableEntry)).toBe(forkStableEntry);
   });
 
   it('keeps the resolved path when the link is missing', () => {

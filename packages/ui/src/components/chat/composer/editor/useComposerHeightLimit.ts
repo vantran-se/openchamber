@@ -29,9 +29,11 @@ export function useComposerHeightLimit(options: UseComposerHeightLimitOptions): 
         }
 
         const host = hostRef.current;
-        const content = host?.querySelector<HTMLElement>('.cm-content');
         const editor = host?.querySelector<HTMLElement>('[data-chat-input="true"]');
-        const scroller = editor?.querySelector<HTMLElement>('.cm-scroller');
+        const content = editor?.querySelector<HTMLElement>('.cm-content')
+            ?? editor?.querySelector<HTMLElement>('textarea');
+        const scroller = editor?.querySelector<HTMLElement>('.cm-scroller')
+            ?? editor?.querySelector<HTMLElement>('textarea');
         if (!host || !content || !editor || !scroller) return;
 
         const bound = boundSelector ? host.closest<HTMLElement>(boundSelector) : null;
