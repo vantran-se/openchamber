@@ -223,9 +223,12 @@ under the box and beside a box narrower than the transcript (wide layout)
 thin out gradually instead of running into the window's edge.
 The variable is written straight to the DOM, so composer growth never
 re-renders the timeline: the list's own footer observer extends the content
-and the scroll hook's pinned-end observer keeps a reader on the end. The
-mobile keyboard choreography is unchanged: the form inside the slot is still
-the keyboard mover and the column shrinks around it at settle.
+and the scroll hook's pinned-end observer keeps a reader on the end. The form
+inside the slot remains the keyboard mover. iOS uses the native textarea editor
+so WebKit owns composition and keyboard scrolling. In browser tabs, the
+viewport helper reveals the composer only when the keyboard obscures it and
+restores the previous ancestor scroll after blur. Android browsers keep the
+fixed-form pin because they still ignore `interactive-widget=resizes-content`.
 
 The box clips its contents, so popups anchor to the wrapper outside it. The
 dictation overlay (`.oc-dictation-overlay`) never shows the composer's own

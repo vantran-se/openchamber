@@ -165,7 +165,10 @@ function removeStartupEnvFile() {
 }
 
 const PNPM_STORE_SEGMENT = `${path.sep}.pnpm${path.sep}`;
-const PACKAGE_SEGMENT = `${path.sep}node_modules${path.sep}@openchamber${path.sep}web${path.sep}`;
+const PACKAGE_SEGMENTS = [
+  `${path.sep}node_modules${path.sep}@vantran-se${path.sep}openchamber-web${path.sep}`,
+  `${path.sep}node_modules${path.sep}@openchamber${path.sep}web${path.sep}`,
+];
 
 // pnpm keeps every installed version in its own store directory and links the
 // current one into node_modules. A startup service pointed at the store path
@@ -173,13 +176,16 @@ const PACKAGE_SEGMENT = `${path.sep}node_modules${path.sep}@openchamber${path.se
 function stablePnpmEntrypoint(resolved, exists = fs.existsSync) {
   const storeIndex = resolved.indexOf(PNPM_STORE_SEGMENT);
   if (storeIndex < 0) return null;
-  const packageIndex = resolved.indexOf(PACKAGE_SEGMENT, storeIndex);
-  if (packageIndex < 0) return null;
+  const packageMatch = PACKAGE_SEGMENTS
+    .map((segment) => ({ segment, index: resolved.indexOf(segment, storeIndex) }))
+    .find(({ index }) => index >= 0);
+  if (!packageMatch) return null;
+  const forkPackage = packageMatch.segment.includes('@vantran-se');
   const stable = path.join(
     resolved.slice(0, storeIndex),
-    '@openchamber',
-    'web',
-    resolved.slice(packageIndex + PACKAGE_SEGMENT.length),
+    forkPackage ? '@vantran-se' : '@openchamber',
+    forkPackage ? 'openchamber-web' : 'web',
+    resolved.slice(packageMatch.index + packageMatch.segment.length),
   );
   return exists(stable) ? stable : null;
 }
