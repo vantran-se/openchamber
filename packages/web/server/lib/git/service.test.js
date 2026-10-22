@@ -3323,7 +3323,7 @@ describe('git remote arguments with option-like names', () => {
 
     expect(branches.all).toContain(`remotes/${OPTION_LIKE_REMOTE}/react`);
     expect(branches.all).not.toContain(`remotes/${OPTION_LIKE_REMOTE}/gone`);
-    expect(branches.defaultBranches[OPTION_LIKE_REMOTE]).toBe('react');
+    expect(branches.defaultBranches[OPTION_LIKE_REMOTE]).toBeUndefined();
   }, 30_000);
 
   it('does not interpret an option-like ensureRemoteUrl as a git option when validating', async () => {
