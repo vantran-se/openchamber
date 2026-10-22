@@ -309,8 +309,13 @@ describe('createParsedStatus', () => {
 });
 
 describe('limitResetsAt', () => {
+    type RateLimitBody = {
+        error?: { type?: string; resets_at?: string; retry_after?: number };
+        resets_at?: number | string;
+    };
+
     const error = (body: string): StructuredError => ({ type: 'provider.rate-limit', message: 'limit', status: 429, response: { body } });
-    const rateLimit = (body: unknown) => error(JSON.stringify(body));
+    const rateLimit = (body: RateLimitBody) => error(JSON.stringify(body));
 
     test('reads resets_at under error, as the Claude Code plugin sends it', () => {
         const claude = rateLimit({ error: { type: 'rate_limit_error', resets_at: '2026-10-19T12:20:00.000Z', retry_after: 16775 } });

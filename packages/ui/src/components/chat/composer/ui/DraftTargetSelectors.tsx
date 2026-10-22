@@ -184,7 +184,7 @@ function DraftTargetSelectorsView(props: DraftTargetProps) {
     useWidthMorph(worktreeTriggerRef);
     // Controlled Select closes can omit finalFocus's interaction type.
     const keyboardCloseRef = React.useRef(false);
-    const getComposerInput = () => projectTriggerRef.current?.closest('form')?.querySelector<HTMLElement>('[data-chat-input="true"] .cm-content');
+    const getComposerInput = () => projectTriggerRef.current?.closest('form')?.querySelector<HTMLElement>('[data-chat-input="true"] .cm-content, [data-chat-input="true"] textarea');
     const getFinalFocus = () => keyboardCloseRef.current ? getComposerInput() : true;
     const projectSearchRef = React.useRef<HTMLInputElement>(null);
     // Preserve Select's dialog portal and main-area containment.
