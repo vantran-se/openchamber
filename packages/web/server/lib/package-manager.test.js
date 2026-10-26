@@ -549,7 +549,7 @@ describe('executeUpdate', () => {
     stubSpawnSync({ listingStdout: '', listingStatus: 1 });
     const result = executeUpdate('npm', { targetVersion: '1.24.1' });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Could not determine');
+    expect(result.error).toContain('Could not read');
   });
 
   it.each([
@@ -646,6 +646,24 @@ describe('executeUpdate', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Both');
+  });
+
+  it('does not mutate packages when the installed inventory cannot be read', () => {
+    const commands = [];
+    spawnSync.mockImplementation((command, args) => {
+      if (Array.isArray(args)) {
+        if (args.includes('--version')) return { status: 0, stdout: '10.0.0', stderr: '' };
+        return { status: 1, stdout: '', stderr: 'registry unavailable' };
+      }
+      commands.push(command);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const result = executeUpdate('npm', { targetVersion: '1.24.1' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('inventory');
+    expect(commands).toEqual([]);
   });
 
   it('keeps the previous behavior when no target version is given', () => {

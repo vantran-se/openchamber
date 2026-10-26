@@ -644,11 +644,12 @@ function getInstalledGlobalPackages(pm) {
     });
     const stdout = String(result.stdout || '');
     return {
+      readable: result.status === 0,
       forkVersion: stdout.match(/@vantran-se\/openchamber-web[@\s]+v?(\d[\w.+-]*)/)?.[1] || null,
       legacyVersion: stdout.match(/@openchamber\/web[@\s]+v?(\d[\w.+-]*)/)?.[1] || null,
     };
   } catch {
-    return { forkVersion: null, legacyVersion: null };
+    return { readable: false, forkVersion: null, legacyVersion: null };
   }
 }
 
@@ -889,6 +890,14 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
   if (!options?.silent) {
     console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
     console.log(`Running: ${command}`);
+  }
+
+  if (!installedBefore.readable) {
+    return {
+      success: false,
+      exitCode: 1,
+      error: `Could not read the global package inventory from ${pm}; no packages were changed.`,
+    };
   }
 
   if (installedBefore.forkVersion && installedBefore.legacyVersion) {
