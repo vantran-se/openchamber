@@ -40,13 +40,13 @@ const packageManagerCases = [
   },
 ];
 
-const fixture = (pm, { failForkInstall = false } = {}) => {
+const fixture = (pm, { failForkInstall = false, binaryOnPath = true } = {}) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-install-'));
   const state = path.join(directory, 'state');
   const log = path.join(directory, 'log');
   fs.writeFileSync(state, 'legacy');
   executable(directory, 'node', 'echo v24.14.0');
-  executable(directory, 'openchamber', 'echo "legacy updater must not run" >&2; exit 99');
+  if (binaryOnPath) executable(directory, 'openchamber', 'echo "legacy updater must not run" >&2; exit 99');
   executable(directory, pm.name, `
 case "$*" in
   "${pm.list}")
@@ -67,7 +67,7 @@ esac`);
 
 for (const pm of packageManagerCases) {
   test(`migrates a legacy ${pm.name} install to the fork package`, () => {
-    const { directory, state, log } = fixture(pm);
+    const { directory, state, log } = fixture(pm, { binaryOnPath: pm.name !== 'npm' });
 
     execFileSync('/bin/bash', [installer], {
       env: { ...process.env, PATH: `${directory}:/usr/bin:/bin`, HOME: directory, TERM: 'dumb' },

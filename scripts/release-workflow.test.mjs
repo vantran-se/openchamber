@@ -23,7 +23,8 @@ test('release version drives the package manifest and exact tarball publication'
   assert.match(run('Verify source version'), /source_version=.*package\.json/);
   assert.match(run('Verify source version'), /source_version.*RELEASE_VERSION/);
   assert.match(run('Set fork package metadata'), /npm pkg set version="\$RELEASE_VERSION"/);
-  assert.match(run('Publish package'), /steps\.pack\.outputs\.tarball/);
+  assert.match(run('Publish package'), /npm view "@vantran-se\/openchamber-web@\$RELEASE_VERSION"/);
+  assert.match(run('Publish package'), /npm publish.*steps\.pack\.outputs\.tarball/);
   const draft = release.steps.find((step) => step.name === 'Create draft GitHub release and attach exact tarball');
   const publish = release.steps.find((step) => step.name === 'Publish GitHub release');
   assert.equal(draft.with.draft, true);
