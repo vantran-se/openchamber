@@ -610,6 +610,44 @@ describe('executeUpdate', () => {
     expect(result.error).toContain('restored @openchamber/web@1.23.0');
   });
 
+  it('restores the exact previous fork version when a normal update fails', () => {
+    const commands = [];
+    let listing = '@vantran-se/openchamber-web@1.23.0';
+    spawnSync.mockImplementation((command, args) => {
+      if (Array.isArray(args)) {
+        if (args.includes('--version')) return { status: 0, stdout: '10.0.0', stderr: '' };
+        return { status: 0, stdout: listing, stderr: '' };
+      }
+      commands.push(command);
+      if (command === 'npm install -g @vantran-se/openchamber-web@1.24.1') {
+        listing = '';
+        return { status: 1, stdout: '', stderr: '' };
+      }
+      if (command === 'npm uninstall -g @vantran-se/openchamber-web') listing = '';
+      if (command === 'npm install -g @vantran-se/openchamber-web@1.23.0') listing = '@vantran-se/openchamber-web@1.23.0';
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    const result = executeUpdate('npm', { targetVersion: '1.24.1' });
+
+    expect(result.success).toBe(false);
+    expect(commands).toEqual([
+      'npm install -g @vantran-se/openchamber-web@1.24.1',
+      'npm uninstall -g @vantran-se/openchamber-web',
+      'npm install -g @vantran-se/openchamber-web@1.23.0',
+    ]);
+    expect(result.error).toContain('restored @vantran-se/openchamber-web@1.23.0');
+  });
+
+  it('refuses an ambiguous installation where both package names are present', () => {
+    stubSpawnSync({ listingStdout: '@openchamber/web@1.23.0\n@vantran-se/openchamber-web@1.23.0' });
+
+    const result = executeUpdate('npm', { targetVersion: '1.24.1' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Both');
+  });
+
   it('keeps the previous behavior when no target version is given', () => {
     stubSpawnSync();
     const result = executeUpdate('npm');

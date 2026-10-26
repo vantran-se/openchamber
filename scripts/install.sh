@@ -282,8 +282,12 @@ main() {
   # package managers even when their global bin is not on PATH, then migrate the
   # one legacy owner. Multiple owners need manual cleanup rather than guessing.
   legacy_pm=""
+  fork_pm=""
   for candidate in pnpm yarn bun npm; do
-    if command_exists "$candidate" && [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
+    if ! command_exists "$candidate"; then
+      continue
+    fi
+    if [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
       if [ -n "$legacy_pm" ]; then
         error "$LEGACY_PACKAGE_NAME is installed by more than one package manager ($legacy_pm and $candidate)."
         echo "  Remove the duplicate global packages, then rerun this installer."
@@ -291,9 +295,29 @@ main() {
       fi
       legacy_pm=$candidate
     fi
+    if [ -n "$(get_global_package_version "$candidate" "$PACKAGE_NAME")" ]; then
+      if [ -n "$fork_pm" ]; then
+        error "$PACKAGE_NAME is installed by more than one package manager ($fork_pm and $candidate)."
+        echo "  Remove the duplicate global packages, then rerun this installer."
+        exit 1
+      fi
+      fork_pm=$candidate
+    fi
   done
+  if [ -n "$legacy_pm" ] && [ -n "$fork_pm" ]; then
+    error "Both $LEGACY_PACKAGE_NAME and $PACKAGE_NAME are installed globally."
+    echo "  Remove the duplicate package, then rerun this installer."
+    exit 1
+  fi
   if [ -n "$legacy_pm" ]; then
     migrate_legacy_install "$legacy_pm"
+  fi
+  if [ -n "$fork_pm" ] && ! command_exists "$BIN_NAME"; then
+    INSTALL_CMD=$(get_install_command "$fork_pm")
+    info "Repairing the existing $PACKAGE_NAME installation with $fork_pm..."
+    eval "$INSTALL_CMD"
+    success "OpenChamber is up to date."
+    exit 0
   fi
 
   if command_exists "$BIN_NAME"; then

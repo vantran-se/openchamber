@@ -79,6 +79,26 @@ for (const pm of packageManagerCases) {
   });
 }
 
+test('refuses duplicate package ownership across package managers', () => {
+  const npm = packageManagerCases[0];
+  const { directory, state } = fixture(npm, { binaryOnPath: false });
+  fs.writeFileSync(state, 'fork');
+  executable(directory, 'pnpm', `
+case "$*" in
+  "list -g --depth=0") echo '@openchamber/web@2.5.0' ;;
+  "--version") echo 9.0.0 ;;
+  *) exit 1 ;;
+esac`);
+
+  const result = spawnSync('/bin/bash', [installer], {
+    env: { ...process.env, PATH: `${directory}:/usr/bin:/bin`, HOME: directory, TERM: 'dumb' },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Both @openchamber\/web and @vantran-se\/openchamber-web are installed globally/);
+});
+
 test('restores the exact legacy package when installer migration fails', () => {
   const pm = packageManagerCases[0];
   const { directory, state, log } = fixture(pm, { failForkInstall: true });
