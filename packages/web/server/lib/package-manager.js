@@ -13,7 +13,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PACKAGE_NAME = '@vantran-se/openchamber-web';
-const PACKAGE_PATH_SEGMENTS = PACKAGE_NAME.split('/');
+const LEGACY_PACKAGE_NAME = '@openchamber/web';
+const PACKAGE_NAMES = [PACKAGE_NAME, LEGACY_PACKAGE_NAME];
+const PACKAGE_PATH_SEGMENTS = PACKAGE_NAMES.map((name) => name.split('/'));
 const GITHUB_RELEASES_URL = 'https://github.com/vantran-se/openchamber/releases';
 const GITHUB_RELEASES_API_URL = 'https://api.github.com/repos/vantran-se/openchamber/releases';
 const UPSTREAM_RELEASES_API_URL = 'https://api.github.com/repos/openchamber/openchamber/releases';
@@ -230,9 +232,9 @@ function getCurrentPackagePath() {
   return path.resolve(__dirname, '..', '..');
 }
 
-function getPackagePathForGlobalRoot(rootPath) {
-  if (!rootPath) return null;
-  return path.join(rootPath, ...PACKAGE_PATH_SEGMENTS);
+function getPackagePathsForGlobalRoot(rootPath) {
+  if (!rootPath) return [];
+  return PACKAGE_PATH_SEGMENTS.map((segments) => path.join(rootPath, ...segments));
 }
 
 function getUniquePaths(paths) {
@@ -372,7 +374,7 @@ function detectPackageManagerFromCurrentInstallPath() {
 function packageManagerOwnsCurrentInstall(pm) {
   const currentPackagePaths = getComparablePaths(getCurrentPackagePath());
   const candidatePackagePaths = [
-    ...getGlobalNodeModulesRoots(pm).map(getPackagePathForGlobalRoot),
+    ...getGlobalNodeModulesRoots(pm).flatMap(getPackagePathsForGlobalRoot),
     ...getOwnedPackagePathsFromGlobalBins(pm),
   ];
 
@@ -596,13 +598,13 @@ function isCommandAvailable(command) {
 function getGlobalListArgs(pm) {
   switch (pm) {
     case 'pnpm':
-      return ['list', '-g', '--depth=0', PACKAGE_NAME];
+      return ['list', '-g', '--depth=0'];
     case 'yarn':
       return ['global', 'list', '--depth=0'];
     case 'bun':
       return ['pm', 'ls', '-g'];
     default:
-      return ['list', '-g', '--depth=0', PACKAGE_NAME];
+      return ['list', '-g', '--depth=0'];
   }
 }
 
@@ -619,7 +621,7 @@ function isPackageInstalledWith(pm) {
     });
 
     if (result.status !== 0) return false;
-    return result.stdout.includes(PACKAGE_NAME) || result.stdout.includes('openchamber');
+    return PACKAGE_NAMES.some((name) => result.stdout.includes(name));
   } catch {
     return false;
   }
