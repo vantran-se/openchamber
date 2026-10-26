@@ -181,10 +181,10 @@ migrate_legacy_install() {
   legacy_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
   [ -n "$legacy_version" ] || return 1
   case "$pm" in
-    pnpm) restore_hint="pnpm add -g$(get_pnpm_allow_build_flags) $LEGACY_PACKAGE_NAME@$legacy_version" ;;
-    yarn) restore_hint="yarn global add $LEGACY_PACKAGE_NAME@$legacy_version" ;;
-    bun) restore_hint="bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
-    npm) restore_hint="npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    pnpm) restore_hint="pnpm remove -g $PACKAGE_NAME && pnpm add -g$(get_pnpm_allow_build_flags) $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    yarn) restore_hint="yarn global remove $PACKAGE_NAME && yarn global add $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    bun) restore_hint="bun remove -g $PACKAGE_NAME && bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    npm) restore_hint="npm uninstall -g $PACKAGE_NAME && npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
   esac
 
   remove_legacy=$(get_remove_command "$pm" "$LEGACY_PACKAGE_NAME")
@@ -205,8 +205,16 @@ migrate_legacy_install() {
     exit 1
   fi
 
-  fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME")
-  remaining_legacy=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
+  if ! fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME") \
+    || ! remaining_legacy=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME"); then
+    if restore_legacy_install "$pm" "$legacy_version"; then
+      error "Could not read the post-install inventory; restored $LEGACY_PACKAGE_NAME@$legacy_version."
+    else
+      error "Could not read the post-install inventory, and rollback failed."
+      echo "  Recover with: $restore_hint"
+    fi
+    exit 1
+  fi
   if [ -z "$fork_version" ] || [ -n "$remaining_legacy" ]; then
     if restore_legacy_install "$pm" "$legacy_version"; then
       error "Could not verify that $PACKAGE_NAME owns the installation; restored $LEGACY_PACKAGE_NAME@$legacy_version."

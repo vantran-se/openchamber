@@ -900,6 +900,27 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     };
   }
 
+  for (const candidate of ['pnpm', 'yarn', 'bun', 'npm']) {
+    if (candidate === pm) continue;
+    const candidateCommand = resolvePackageManagerCommand(candidate);
+    if (!isCommandAvailable(candidateCommand)) continue;
+    const candidateInventory = getInstalledGlobalPackages(candidate);
+    if (!candidateInventory.readable) {
+      return {
+        success: false,
+        exitCode: 1,
+        error: `Could not read the global package inventory from ${candidate}; no packages were changed.`,
+      };
+    }
+    if (candidateInventory.forkVersion || candidateInventory.legacyVersion) {
+      return {
+        success: false,
+        exitCode: 1,
+        error: `Another global OpenChamber package is installed with ${candidate}; remove the duplicate before updating with ${pm}.`,
+      };
+    }
+  }
+
   if (installedBefore.forkVersion && installedBefore.legacyVersion) {
     return {
       success: false,
@@ -931,7 +952,7 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
       : verified.forkVersion === restorePackage.version && !verified.legacyVersion;
     return removedFork.status === 0 && restored?.status === 0 && inventoryMatches
       ? `; restored ${restorePackage.name}@${restorePackage.version}`
-      : `; rollback failed—recover with: ${restoreCommand}`;
+      : `; rollback failed—recover with: ${forkRemoveCommand} && ${restoreCommand}`;
   };
 
   if (result.status !== 0) {
