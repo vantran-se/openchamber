@@ -510,12 +510,12 @@ describe('executeUpdate', () => {
         return { status: installStatus, stdout: '', stderr: '' };
       }
       if (args.includes('--version')) {
-        return { status: 0, stdout: '10.0.0', stderr: '' };
+        return { status: command === 'npm' ? 0 : 1, stdout: command === 'npm' ? '10.0.0' : '', stderr: '' };
       }
-      if (args[0] === 'list' || args[0] === 'pm' || args[0] === 'global') {
+      if (command === 'npm' && (args[0] === 'list' || args[0] === 'pm' || args[0] === 'global')) {
         return { status: listingStatus, stdout: listingStdout, stderr: '' };
       }
-      return { status: 0, stdout: '', stderr: '' };
+      return { status: 1, stdout: '', stderr: '' };
     });
   }
 
@@ -556,14 +556,14 @@ describe('executeUpdate', () => {
     ['npm', 'npm uninstall -g @openchamber/web', 'npm install -g @vantran-se/openchamber-web@1.24.1'],
     ['pnpm', 'pnpm remove -g @openchamber/web', 'pnpm add -g @vantran-se/openchamber-web@1.24.1'],
     ['yarn', 'yarn global remove @openchamber/web', 'yarn global add @vantran-se/openchamber-web@1.24.1'],
-    ['bun', `${path.join(process.env.HOME, '.bun/bin/bun')} remove -g @openchamber/web`, `${path.join(process.env.HOME, '.bun/bin/bun')} add -g @vantran-se/openchamber-web@1.24.1`],
+    ['bun', 'bun remove -g @openchamber/web', 'bun add -g @vantran-se/openchamber-web@1.24.1'],
   ])('migrates a legacy %s install without leaving two binary owners', (pm, removeCommand, installCommand) => {
     const commands = [];
     let listing = `@openchamber/web@1.23.0`;
     spawnSync.mockImplementation((command, args) => {
       if (Array.isArray(args)) {
-        if (args.includes('--version')) return { status: 0, stdout: '9.0.0', stderr: '' };
-        return { status: 0, stdout: listing, stderr: '' };
+        if (args.includes('--version')) return { status: command === pm ? 0 : 1, stdout: command === pm ? '9.0.0' : '', stderr: '' };
+        return command === pm ? { status: 0, stdout: listing, stderr: '' } : { status: 1, stdout: '', stderr: '' };
       }
       commands.push(command);
       if (command === removeCommand) listing = '';
@@ -585,8 +585,8 @@ describe('executeUpdate', () => {
     let listing = '@openchamber/web@1.23.0';
     spawnSync.mockImplementation((command, args) => {
       if (Array.isArray(args)) {
-        if (args.includes('--version')) return { status: 0, stdout: '10.0.0', stderr: '' };
-        return { status: 0, stdout: listing, stderr: '' };
+        if (args.includes('--version')) return { status: command === 'npm' ? 0 : 1, stdout: command === 'npm' ? '10.0.0' : '', stderr: '' };
+        return command === 'npm' ? { status: 0, stdout: listing, stderr: '' } : { status: 1, stdout: '', stderr: '' };
       }
       commands.push(command);
       if (command === 'npm uninstall -g @openchamber/web') listing = '';
@@ -615,8 +615,8 @@ describe('executeUpdate', () => {
     let listing = '@vantran-se/openchamber-web@1.23.0';
     spawnSync.mockImplementation((command, args) => {
       if (Array.isArray(args)) {
-        if (args.includes('--version')) return { status: 0, stdout: '10.0.0', stderr: '' };
-        return { status: 0, stdout: listing, stderr: '' };
+        if (args.includes('--version')) return { status: command === 'npm' ? 0 : 1, stdout: command === 'npm' ? '10.0.0' : '', stderr: '' };
+        return command === 'npm' ? { status: 0, stdout: listing, stderr: '' } : { status: 1, stdout: '', stderr: '' };
       }
       commands.push(command);
       if (command === 'npm install -g @vantran-se/openchamber-web@1.24.1') {
@@ -652,7 +652,7 @@ describe('executeUpdate', () => {
     const commands = [];
     spawnSync.mockImplementation((command, args) => {
       if (Array.isArray(args)) {
-        if (args.includes('--version')) return { status: 0, stdout: '10.0.0', stderr: '' };
+        if (args.includes('--version')) return { status: command === 'npm' ? 0 : 1, stdout: command === 'npm' ? '10.0.0' : '', stderr: '' };
         return { status: 1, stdout: '', stderr: 'registry unavailable' };
       }
       commands.push(command);
