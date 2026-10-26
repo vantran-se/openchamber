@@ -127,16 +127,26 @@ get_install_command() {
   esac
 }
 
+get_global_package_inventory() {
+  local pm=$1
+  case "$pm" in
+    pnpm) pnpm list -g --depth=0 2>/dev/null ;;
+    yarn) yarn global list --depth=0 2>/dev/null ;;
+    bun) bun pm ls -g 2>/dev/null ;;
+    npm) npm list -g --depth=0 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+package_version_from_inventory() {
+  local package=$1
+  sed -nE "s#.*${package}[@[:space:]]+v?([0-9][[:alnum:].+-]*).*#\\1#p" | head -n 1
+}
+
 get_global_package_version() {
   local pm=$1 package=$2 output
-  case "$pm" in
-    pnpm) output=$(pnpm list -g --depth=0 2>/dev/null || true) ;;
-    yarn) output=$(yarn global list --depth=0 2>/dev/null || true) ;;
-    bun) output=$(bun pm ls -g 2>/dev/null || true) ;;
-    npm) output=$(npm list -g --depth=0 2>/dev/null || true) ;;
-    *) return ;;
-  esac
-  printf '%s\n' "$output" | sed -nE "s#.*${package}[@[:space:]]+v?([0-9][[:alnum:].+-]*).*#\\1#p" | head -n 1
+  output=$(get_global_package_inventory "$pm") || return 1
+  printf '%s\n' "$output" | package_version_from_inventory "$package"
 }
 
 get_remove_command() {
@@ -167,9 +177,15 @@ restore_legacy_install() {
 }
 
 migrate_legacy_install() {
-  local pm=$1 legacy_version remove_legacy install_fork fork_version remaining_legacy
+  local pm=$1 legacy_version remove_legacy install_fork fork_version remaining_legacy restore_hint
   legacy_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
   [ -n "$legacy_version" ] || return 1
+  case "$pm" in
+    pnpm) restore_hint="pnpm add -g$(get_pnpm_allow_build_flags) $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    yarn) restore_hint="yarn global add $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    bun) restore_hint="bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    npm) restore_hint="npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+  esac
 
   remove_legacy=$(get_remove_command "$pm" "$LEGACY_PACKAGE_NAME")
   install_fork=$(get_install_command "$pm")
@@ -184,7 +200,7 @@ migrate_legacy_install() {
       error "Fork installation failed; restored $LEGACY_PACKAGE_NAME@$legacy_version."
     else
       error "Fork installation failed, and rollback could not restore only $LEGACY_PACKAGE_NAME@$legacy_version."
-      echo "  Recover with: $(get_install_command "$pm")"
+      echo "  Recover with: $restore_hint"
     fi
     exit 1
   fi
@@ -196,7 +212,7 @@ migrate_legacy_install() {
       error "Could not verify that $PACKAGE_NAME owns the installation; restored $LEGACY_PACKAGE_NAME@$legacy_version."
     else
       error "Could not verify the fork installation, and rollback failed."
-      echo "  Recover with: $(get_install_command "$pm")"
+      echo "  Recover with: $restore_hint"
     fi
     exit 1
   fi
@@ -287,7 +303,14 @@ main() {
     if ! command_exists "$candidate"; then
       continue
     fi
-    if [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
+    if ! inventory=$(get_global_package_inventory "$candidate"); then
+      error "Could not read the global package inventory from $candidate."
+      echo "  No packages were changed. Fix $candidate, then rerun this installer."
+      exit 1
+    fi
+    legacy_version=$(printf '%s\n' "$inventory" | package_version_from_inventory "$LEGACY_PACKAGE_NAME")
+    fork_version=$(printf '%s\n' "$inventory" | package_version_from_inventory "$PACKAGE_NAME")
+    if [ -n "$legacy_version" ]; then
       if [ -n "$legacy_pm" ]; then
         error "$LEGACY_PACKAGE_NAME is installed by more than one package manager ($legacy_pm and $candidate)."
         echo "  Remove the duplicate global packages, then rerun this installer."
@@ -295,7 +318,7 @@ main() {
       fi
       legacy_pm=$candidate
     fi
-    if [ -n "$(get_global_package_version "$candidate" "$PACKAGE_NAME")" ]; then
+    if [ -n "$fork_version" ]; then
       if [ -n "$fork_pm" ]; then
         error "$PACKAGE_NAME is installed by more than one package manager ($fork_pm and $candidate)."
         echo "  Remove the duplicate global packages, then rerun this installer."
