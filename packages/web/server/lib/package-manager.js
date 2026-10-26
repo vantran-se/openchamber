@@ -627,17 +627,13 @@ function isPackageInstalledWith(pm) {
   }
 }
 
-// npm, bun and yarn print `name@version`; pnpm separates the name and the
-// version with whitespace. An optional `v` covers yarn listing formats.
-const GLOBAL_VERSION_PATTERN = /(?:@vantran-se\/openchamber-web|@openchamber\/web)[@\s]+v?(\d[\w.+-]*)/;
-
 /**
  * Read the globally installed version of the package as reported by the
  * package manager itself. Returns null when the listing cannot be read or
  * parsed. The listing command may exit non-zero when the package is missing,
  * so stdout is parsed regardless of the status.
  */
-function getInstalledGlobalVersion(pm) {
+function getInstalledGlobalPackages(pm) {
   try {
     const pmCommand = resolvePackageManagerCommand(pm);
     const result = spawnSync(pmCommand, getGlobalListArgs(pm), {
@@ -646,10 +642,19 @@ function getInstalledGlobalVersion(pm) {
       timeout: 10000,
       ...getSpawnSyncBaseOptions(),
     });
-    return String(result.stdout || '').match(GLOBAL_VERSION_PATTERN)?.[1] || null;
+    const stdout = String(result.stdout || '');
+    return {
+      forkVersion: stdout.match(/@vantran-se\/openchamber-web[@\s]+v?(\d[\w.+-]*)/)?.[1] || null,
+      legacyVersion: stdout.match(/@openchamber\/web[@\s]+v?(\d[\w.+-]*)/)?.[1] || null,
+    };
   } catch {
-    return null;
+    return { forkVersion: null, legacyVersion: null };
   }
+}
+
+function getInstalledGlobalVersion(pm) {
+  const installed = getInstalledGlobalPackages(pm);
+  return installed.forkVersion || installed.legacyVersion;
 }
 
 /**
@@ -683,24 +688,32 @@ function getPnpmAllowBuildFlags(pmCommand) {
  * package manager see different metadata, and dist-tag resolution can lag the
  * check behind a fresh release (stale packument cache, pnpm minimumReleaseAge).
  */
+function getGlobalPackageCommand(pm, action, packageSpec) {
+  const resolvedCommand = resolvePackageManagerCommand(pm);
+  const pmCommand = quoteCommand(resolvedCommand);
+  if (action === 'remove') {
+    switch (pm) {
+      case 'pnpm': return `${pmCommand} remove -g ${packageSpec}`;
+      case 'yarn': return `${pmCommand} global remove ${packageSpec}`;
+      case 'bun': return `${pmCommand} remove -g ${packageSpec}`;
+      default: return `${pmCommand} uninstall -g ${packageSpec}`;
+    }
+  }
+  switch (pm) {
+    case 'pnpm': return `${pmCommand} add -g${getPnpmAllowBuildFlags(resolvedCommand)} ${packageSpec}`;
+    case 'yarn': return `${pmCommand} global add ${packageSpec}`;
+    case 'bun': return `${pmCommand} add -g ${packageSpec}`;
+    default: return `${pmCommand} install -g ${packageSpec}`;
+  }
+}
+
 export function getUpdateCommand(pm = detectPackageManager(), options = {}) {
   const targetVersion = normalizeTargetVersion(options.targetVersion);
   if (options.targetVersion != null && !targetVersion) {
     throw new Error(`Invalid target version for update: ${String(options.targetVersion)}`);
   }
   const versionSpec = targetVersion ? `@${targetVersion}` : '@latest';
-  const resolvedCommand = resolvePackageManagerCommand(pm);
-  const pmCommand = quoteCommand(resolvedCommand);
-  switch (pm) {
-    case 'pnpm':
-      return `${pmCommand} add -g${getPnpmAllowBuildFlags(resolvedCommand)} ${PACKAGE_NAME}${versionSpec}`;
-    case 'yarn':
-      return `${pmCommand} global add ${PACKAGE_NAME}${versionSpec}`;
-    case 'bun':
-      return `${pmCommand} add -g ${PACKAGE_NAME}${versionSpec}`;
-    default:
-      return `${pmCommand} install -g ${PACKAGE_NAME}${versionSpec}`;
-  }
+  return getGlobalPackageCommand(pm, 'install', `${PACKAGE_NAME}${versionSpec}`);
 }
 
 /**
@@ -856,22 +869,49 @@ export async function checkForUpdates(options = {}) {
  */
 export function executeUpdate(pm = detectPackageManager(), options = {}) {
   const command = getUpdateCommand(pm, { targetVersion: options.targetVersion });
-  if (!options?.silent) {
-    console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
-    console.log(`Running: ${command}`);
-  }
-
-  const result = spawnSync(command, {
+  const installedBefore = getInstalledGlobalPackages(pm);
+  const legacyRemoveCommand = getGlobalPackageCommand(pm, 'remove', LEGACY_PACKAGE_NAME);
+  const forkRemoveCommand = getGlobalPackageCommand(pm, 'remove', PACKAGE_NAME);
+  const restoreCommand = installedBefore.legacyVersion
+    ? getGlobalPackageCommand(pm, 'install', `${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`)
+    : null;
+  const runCommand = (value) => spawnSync(value, {
     stdio: 'inherit',
     shell: true,
     ...getSpawnSyncBaseOptions(),
   });
 
+  if (!options?.silent) {
+    console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
+    console.log(`Running: ${command}`);
+  }
+
+  if (installedBefore.legacyVersion) {
+    const removed = runCommand(legacyRemoveCommand);
+    if (removed.status !== 0) {
+      return {
+        success: false,
+        exitCode: removed.status,
+        error: `Could not remove ${LEGACY_PACKAGE_NAME}; package manager exited with code ${removed.status}`,
+      };
+    }
+  }
+
+  const result = runCommand(command);
+
   if (result.status !== 0) {
+    let rollback = '';
+    if (restoreCommand) {
+      runCommand(forkRemoveCommand);
+      const restored = runCommand(restoreCommand);
+      rollback = restored.status === 0
+        ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
+        : `; failed to restore ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`;
+    }
     return {
       success: false,
       exitCode: result.status,
-      error: `Package manager exited with code ${result.status}`,
+      error: `Package manager exited with code ${result.status}${rollback}`,
     };
   }
 
@@ -884,20 +924,30 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     };
   }
 
-  const installedVersion = getInstalledGlobalVersion(pm);
+  const installedAfter = getInstalledGlobalPackages(pm);
+  const installedVersion = installedAfter.forkVersion;
+  let verificationError = null;
   if (!installedVersion) {
-    return {
-      success: false,
-      exitCode: result.status,
-      error: `Could not determine the globally installed ${PACKAGE_NAME} version after the update; not reporting success`,
-    };
+    verificationError = `Could not determine the globally installed ${PACKAGE_NAME} version after the update; not reporting success`;
+  } else if (compareVersions(installedVersion, targetVersion) !== 0) {
+    verificationError = `Installed ${PACKAGE_NAME} version ${installedVersion} does not match target ${targetVersion}. The package manager may have resolved different metadata or filtered the release.`;
+  } else if (installedAfter.legacyVersion) {
+    verificationError = `${LEGACY_PACKAGE_NAME}@${installedAfter.legacyVersion} still owns a competing global OpenChamber installation.`;
   }
 
-  if (compareVersions(installedVersion, targetVersion) !== 0) {
+  if (verificationError) {
+    let rollback = '';
+    if (restoreCommand) {
+      runCommand(forkRemoveCommand);
+      const restored = runCommand(restoreCommand);
+      rollback = restored.status === 0
+        ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
+        : `; failed to restore ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`;
+    }
     return {
       success: false,
       exitCode: result.status,
-      error: `Installed ${PACKAGE_NAME} version ${installedVersion} does not match target ${targetVersion}. The package manager may have resolved different metadata or filtered the release.`,
+      error: `${verificationError}${rollback}`,
     };
   }
 

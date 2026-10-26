@@ -5,6 +5,7 @@
 set -euo pipefail
 
 PACKAGE_NAME="@vantran-se/openchamber-web"
+LEGACY_PACKAGE_NAME="@openchamber/web"
 BIN_NAME="openchamber"
 MIN_NODE_MAJOR=24
 MIN_NODE_MINOR=14
@@ -126,6 +127,71 @@ get_install_command() {
   esac
 }
 
+get_global_package_version() {
+  local pm=$1 package=$2 output
+  case "$pm" in
+    pnpm) output=$(pnpm list -g --depth=0 2>/dev/null || true) ;;
+    yarn) output=$(yarn global list --depth=0 2>/dev/null || true) ;;
+    bun) output=$(bun pm ls -g 2>/dev/null || true) ;;
+    npm) output=$(npm list -g --depth=0 2>/dev/null || true) ;;
+    *) return ;;
+  esac
+  printf '%s\n' "$output" | sed -nE "s#.*${package}[@[:space:]]+v?([0-9][[:alnum:].+-]*).*#\\1#p" | head -n 1
+}
+
+get_remove_command() {
+  local pm=$1 package=$2
+  case "$pm" in
+    pnpm) echo "pnpm remove -g $package" ;;
+    yarn) echo "yarn global remove $package" ;;
+    bun) echo "bun remove -g $package" ;;
+    npm) echo "npm uninstall -g $package" ;;
+  esac
+}
+
+migrate_legacy_install() {
+  local pm=$1 legacy_version remove_legacy install_fork remove_fork restore_legacy
+  legacy_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
+  [ -n "$legacy_version" ] || return 1
+
+  remove_legacy=$(get_remove_command "$pm" "$LEGACY_PACKAGE_NAME")
+  install_fork=$(get_install_command "$pm")
+  remove_fork=$(get_remove_command "$pm" "$PACKAGE_NAME")
+  case "$pm" in
+    pnpm) restore_legacy="pnpm add -g$(get_pnpm_allow_build_flags) $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    yarn) restore_legacy="yarn global add $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    bun) restore_legacy="bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+    npm) restore_legacy="npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
+  esac
+
+  info "Migrating $LEGACY_PACKAGE_NAME to $PACKAGE_NAME with $pm..."
+  if ! eval "$remove_legacy"; then
+    error "Could not remove $LEGACY_PACKAGE_NAME."
+    exit 1
+  fi
+  if ! eval "$install_fork"; then
+    eval "$remove_fork" >/dev/null 2>&1 || true
+    if eval "$restore_legacy"; then
+      error "Fork installation failed; restored $LEGACY_PACKAGE_NAME@$legacy_version."
+    else
+      error "Fork installation failed, and $LEGACY_PACKAGE_NAME@$legacy_version could not be restored."
+    fi
+    exit 1
+  fi
+
+  local fork_version remaining_legacy
+  fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME")
+  remaining_legacy=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
+  if [ -z "$fork_version" ] || [ -n "$remaining_legacy" ]; then
+    eval "$remove_fork" >/dev/null 2>&1 || true
+    eval "$restore_legacy" >/dev/null 2>&1 || true
+    error "Could not verify that $PACKAGE_NAME owns the installation; restored the legacy package."
+    exit 1
+  fi
+  success "Migrated OpenChamber to $PACKAGE_NAME@$fork_version."
+  exit 0
+}
+
 # Install Node.js suggestion
 suggest_node_install() {
   echo ""
@@ -200,11 +266,16 @@ main() {
   fi
   success "Node.js v$NODE_VERSION found"
 
-  # If OpenChamber is already installed, hand off to its own updater instead
-  # of guessing a package manager. `openchamber update` detects which manager
-  # actually owns the existing global install and reinstalls with that one —
-  # reinstalling with a different manager here would orphan files and break PATH.
+  # A legacy upstream package exports the same binary as this fork. Remove it
+  # before installing the fork so the global bin has exactly one owner. If the
+  # fork install fails, migration restores the exact legacy version.
   if command_exists "$BIN_NAME"; then
+    for candidate in pnpm yarn bun npm; do
+      if command_exists "$candidate" && [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
+        migrate_legacy_install "$candidate"
+      fi
+    done
+
     info "OpenChamber is already installed — updating via 'openchamber update'..."
     echo ""
     if openchamber update; then
