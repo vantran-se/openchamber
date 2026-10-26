@@ -905,13 +905,6 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     const candidateCommand = resolvePackageManagerCommand(candidate);
     if (!isCommandAvailable(candidateCommand)) continue;
     const candidateInventory = getInstalledGlobalPackages(candidate);
-    if (!candidateInventory.readable) {
-      return {
-        success: false,
-        exitCode: 1,
-        error: `Could not read the global package inventory from ${candidate}; no packages were changed.`,
-      };
-    }
     if (candidateInventory.forkVersion || candidateInventory.legacyVersion) {
       return {
         success: false,
