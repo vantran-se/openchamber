@@ -104,7 +104,7 @@ printf '4321\\n'`);
       const parsed = { destination: 'user@example.test', args: [] };
 
       await manager.installOpenChamberManaged(parsed, '/unused.sock', '1.2.3', 'auto');
-      expect(fs.readFileSync(path.join(home, 'install-args'), 'utf8')).toBe('add\n-g\n@openchamber/web@1.2.3\n');
+      expect(fs.readFileSync(path.join(home, 'install-args'), 'utf8')).toBe('add\n-g\n@vantran-se/openchamber-web@1.2.3\n');
       const result = await manager.ensureRemoteServer({
         id: 'ssh-paths', auth: {}, remoteOpenchamber: { mode: 'managed', installMethod: 'auto' },
       }, parsed, '/unused.sock');
@@ -609,7 +609,7 @@ printf '4321\\n'`);
 
     await manager.installOpenChamberManaged({ destination: 'user@example.test', args: [] }, '/tmp/control.sock', '1.2.3', 'auto');
 
-    expect(commands).toEqual(["'/home/pi/.bun/bin/bun' add -g @openchamber/web@1.2.3"]);
+    expect(commands).toEqual(["'/home/pi/.bun/bin/bun' add -g @vantran-se/openchamber-web@1.2.3"]);
   });
   test('stops a remote server it started through the CLI, not the authenticated HTTP route', async () => {
     const scripts = [];

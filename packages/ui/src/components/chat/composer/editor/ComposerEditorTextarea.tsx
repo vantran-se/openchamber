@@ -166,9 +166,9 @@ export const ComposerEditorTextarea = React.forwardRef<ComposerEditorHandle, Com
             replaceRange(from, to, text, selectionStart, selectionEnd) {
                 applyEdit(from, to, text, selectionStart, selectionEnd);
             },
-            caretCoords() {
+            caretCoords(position) {
                 const textarea = textareaRef.current;
-                return textarea ? textareaCaretCoords(textarea) : null;
+                return textarea ? textareaCaretCoords(textarea, position) : null;
             },
             getScrollDOM() {
                 return textareaRef.current;

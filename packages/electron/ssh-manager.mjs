@@ -1111,10 +1111,10 @@ export class ElectronSshManager {
 
     // bun's global install targets `~/.bun` or `${XDG_CACHE_HOME:-~/.cache}/.bun` (bun 1.3.x XDG-aware);
     // npm is pinned to a prefix in the user's home so it never touches the root-owned global directory.
-    const bunCommand = bunPath ? `${shellQuote(bunPath)} add -g @openchamber/web@${version}` : null;
+    const bunCommand = bunPath ? `${shellQuote(bunPath)} add -g @vantran-se/openchamber-web@${version}` : null;
     const npmCommand = npmPath
       // npm is a node script: an nvm npm finds its node only next to itself.
-      ? `mkdir -p "${REMOTE_USER_PREFIX}" && PATH="$(dirname ${shellQuote(npmPath)}):$PATH" ${shellQuote(npmPath)} install -g --prefix "${REMOTE_USER_PREFIX}" @openchamber/web@${version}`
+      ? `mkdir -p "${REMOTE_USER_PREFIX}" && PATH="$(dirname ${shellQuote(npmPath)}):$PATH" ${shellQuote(npmPath)} install -g --prefix "${REMOTE_USER_PREFIX}" @vantran-se/openchamber-web@${version}`
       : null;
 
     const commands = [];

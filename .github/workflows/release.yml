@@ -71,7 +71,9 @@ jobs:
 
       - name: Resolve published SDK version
         id: sdk
-        run: echo "version=$(npm view @openchamber/sdk version --registry https://registry.npmjs.org)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: echo "version=$(npm view "@openchamber/sdk@$RELEASE_VERSION" version --registry https://registry.npmjs.org)" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -96,17 +98,27 @@ jobs:
           tarball=$(node -e "console.log(require('./pack-result.json')[0].filename)")
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
+      - name: Create draft GitHub release and attach exact tarball
+        if: ${{ inputs.dry_run != true }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: packages/web/${{ steps.pack.outputs.tarball }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish package
         if: ${{ inputs.dry_run != true }}
         working-directory: packages/web
         run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
 
-      - name: Create GitHub release and attach exact tarball
+      - name: Publish GitHub release
         if: ${{ inputs.dry_run != true }}
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          generate_release_notes: true
-          files: packages/web/${{ steps.pack.outputs.tarball }}
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

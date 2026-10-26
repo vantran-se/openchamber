@@ -65,6 +65,27 @@ describe('textareaCaretCoords', () => {
         expect(coords?.left).toBeDefined();
     });
 
+    test('measures a requested text position instead of the current caret', () => {
+        const win = new Window();
+        Object.defineProperty(globalThis, 'document', { configurable: true, value: win.document });
+        Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: win.getComputedStyle.bind(win) });
+        const textarea = document.createElement('textarea');
+        textarea.value = 'hello world';
+        textarea.setSelectionRange(11, 11);
+        textarea.getBoundingClientRect = () => new win.DOMRect(20, 100, 400, 80);
+        const appendedText: string[] = [];
+        const append = document.body.append.bind(document.body);
+        document.body.append = (...nodes) => {
+            const mirror = nodes[0];
+            if (mirror instanceof win.HTMLElement) appendedText.push(mirror.textContent ?? '');
+            append(...nodes);
+        };
+
+        textareaCaretCoords(textarea, 5);
+
+        expect(appendedText).toEqual(['hello\u200b']);
+    });
+
     test('offsets the mirror by the textarea scroll position', () => {
         const win = new Window();
         Object.defineProperty(globalThis, 'document', { configurable: true, value: win.document });
