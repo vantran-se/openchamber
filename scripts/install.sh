@@ -168,7 +168,8 @@ restore_legacy_install() {
     bun) restore_legacy="bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
     npm) restore_legacy="npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
   esac
-  if ! eval "$remove_fork" || ! eval "$restore_legacy"; then
+  eval "$remove_fork" >/dev/null 2>&1 || true
+  if ! eval "$restore_legacy"; then
     return 1
   fi
   fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME")
