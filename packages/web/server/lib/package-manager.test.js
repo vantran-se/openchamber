@@ -583,8 +583,8 @@ describe('detectPackageManagerDetails', () => {
       globalNodeModulesRoot: null,
     });
     expect(getUpdateCommand()).toBe(packageManager === 'pnpm'
-      ? 'pnpm add -g @openchamber/web@latest'
-      : 'npm install -g @openchamber/web@latest');
+      ? 'pnpm add -g @vantran-se/openchamber-web@latest'
+      : 'npm install -g @vantran-se/openchamber-web@latest');
   });
 
   it('keeps reporting a copy no package manager installed after the first detection', async () => {
