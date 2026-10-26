@@ -950,7 +950,7 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     const inventoryMatches = restorePackage.name === LEGACY_PACKAGE_NAME
       ? !verified.forkVersion && verified.legacyVersion === restorePackage.version
       : verified.forkVersion === restorePackage.version && !verified.legacyVersion;
-    return restored.status === 0 && inventoryMatches
+    return restored.status === 0 && verified.readable && inventoryMatches
       ? `; restored ${restorePackage.name}@${restorePackage.version}`
       : `; rollback failed—recover with: ${forkRemoveCommand} && ${restoreCommand}`;
   };
@@ -975,7 +975,9 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
   const installedAfter = getInstalledGlobalPackages(pm);
   const installedVersion = installedAfter.forkVersion;
   let verificationError = null;
-  if (!installedVersion) {
+  if (!installedAfter.readable) {
+    verificationError = `Could not read the global package inventory from ${pm} after the update.`;
+  } else if (!installedVersion) {
     verificationError = `Could not determine the globally installed ${PACKAGE_NAME} version after the update; not reporting success`;
   } else if (compareVersions(installedVersion, targetVersion) !== 0) {
     verificationError = `Installed ${PACKAGE_NAME} version ${installedVersion} does not match target ${targetVersion}. The package manager may have resolved different metadata or filtered the release.`;
