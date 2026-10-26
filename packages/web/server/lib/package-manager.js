@@ -899,19 +899,24 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
 
   const result = runCommand(command);
 
+  const restoreLegacy = () => {
+    if (!restoreCommand) return '';
+    const removedFork = runCommand(forkRemoveCommand);
+    const restored = removedFork.status === 0 ? runCommand(restoreCommand) : null;
+    const verified = getInstalledGlobalPackages(pm);
+    return removedFork.status === 0
+      && restored?.status === 0
+      && !verified.forkVersion
+      && verified.legacyVersion === installedBefore.legacyVersion
+      ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
+      : `; rollback failed—recover with: ${restoreCommand}`;
+  };
+
   if (result.status !== 0) {
-    let rollback = '';
-    if (restoreCommand) {
-      runCommand(forkRemoveCommand);
-      const restored = runCommand(restoreCommand);
-      rollback = restored.status === 0
-        ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
-        : `; failed to restore ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`;
-    }
     return {
       success: false,
       exitCode: result.status,
-      error: `Package manager exited with code ${result.status}${rollback}`,
+      error: `Package manager exited with code ${result.status}${restoreLegacy()}`,
     };
   }
 
@@ -936,18 +941,10 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
   }
 
   if (verificationError) {
-    let rollback = '';
-    if (restoreCommand) {
-      runCommand(forkRemoveCommand);
-      const restored = runCommand(restoreCommand);
-      rollback = restored.status === 0
-        ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
-        : `; failed to restore ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`;
-    }
     return {
       success: false,
       exitCode: result.status,
-      error: `${verificationError}${rollback}`,
+      error: `${verificationError}${restoreLegacy()}`,
     };
   }
 

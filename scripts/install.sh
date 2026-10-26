@@ -149,13 +149,8 @@ get_remove_command() {
   esac
 }
 
-migrate_legacy_install() {
-  local pm=$1 legacy_version remove_legacy install_fork remove_fork restore_legacy
-  legacy_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
-  [ -n "$legacy_version" ] || return 1
-
-  remove_legacy=$(get_remove_command "$pm" "$LEGACY_PACKAGE_NAME")
-  install_fork=$(get_install_command "$pm")
+restore_legacy_install() {
+  local pm=$1 legacy_version=$2 remove_fork restore_legacy fork_version restored_version
   remove_fork=$(get_remove_command "$pm" "$PACKAGE_NAME")
   case "$pm" in
     pnpm) restore_legacy="pnpm add -g$(get_pnpm_allow_build_flags) $LEGACY_PACKAGE_NAME@$legacy_version" ;;
@@ -163,6 +158,21 @@ migrate_legacy_install() {
     bun) restore_legacy="bun add -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
     npm) restore_legacy="npm install -g $LEGACY_PACKAGE_NAME@$legacy_version" ;;
   esac
+  if ! eval "$remove_fork" || ! eval "$restore_legacy"; then
+    return 1
+  fi
+  fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME")
+  restored_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
+  [ -z "$fork_version" ] && [ "$restored_version" = "$legacy_version" ]
+}
+
+migrate_legacy_install() {
+  local pm=$1 legacy_version remove_legacy install_fork fork_version remaining_legacy
+  legacy_version=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
+  [ -n "$legacy_version" ] || return 1
+
+  remove_legacy=$(get_remove_command "$pm" "$LEGACY_PACKAGE_NAME")
+  install_fork=$(get_install_command "$pm")
 
   info "Migrating $LEGACY_PACKAGE_NAME to $PACKAGE_NAME with $pm..."
   if ! eval "$remove_legacy"; then
@@ -170,22 +180,24 @@ migrate_legacy_install() {
     exit 1
   fi
   if ! eval "$install_fork"; then
-    eval "$remove_fork" >/dev/null 2>&1 || true
-    if eval "$restore_legacy"; then
+    if restore_legacy_install "$pm" "$legacy_version"; then
       error "Fork installation failed; restored $LEGACY_PACKAGE_NAME@$legacy_version."
     else
-      error "Fork installation failed, and $LEGACY_PACKAGE_NAME@$legacy_version could not be restored."
+      error "Fork installation failed, and rollback could not restore only $LEGACY_PACKAGE_NAME@$legacy_version."
+      echo "  Recover with: $(get_install_command "$pm")"
     fi
     exit 1
   fi
 
-  local fork_version remaining_legacy
   fork_version=$(get_global_package_version "$pm" "$PACKAGE_NAME")
   remaining_legacy=$(get_global_package_version "$pm" "$LEGACY_PACKAGE_NAME")
   if [ -z "$fork_version" ] || [ -n "$remaining_legacy" ]; then
-    eval "$remove_fork" >/dev/null 2>&1 || true
-    eval "$restore_legacy" >/dev/null 2>&1 || true
-    error "Could not verify that $PACKAGE_NAME owns the installation; restored the legacy package."
+    if restore_legacy_install "$pm" "$legacy_version"; then
+      error "Could not verify that $PACKAGE_NAME owns the installation; restored $LEGACY_PACKAGE_NAME@$legacy_version."
+    else
+      error "Could not verify the fork installation, and rollback failed."
+      echo "  Recover with: $(get_install_command "$pm")"
+    fi
     exit 1
   fi
   success "Migrated OpenChamber to $PACKAGE_NAME@$fork_version."
@@ -266,16 +278,25 @@ main() {
   fi
   success "Node.js v$NODE_VERSION found"
 
-  # A legacy upstream package exports the same binary as this fork. Remove it
-  # before installing the fork so the global bin has exactly one owner. If the
-  # fork install fails, migration restores the exact legacy version.
-  if command_exists "$BIN_NAME"; then
-    for candidate in pnpm yarn bun npm; do
-      if command_exists "$candidate" && [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
-        migrate_legacy_install "$candidate"
+  # A legacy upstream package exports the same binary as this fork. Inventory
+  # package managers even when their global bin is not on PATH, then migrate the
+  # one legacy owner. Multiple owners need manual cleanup rather than guessing.
+  legacy_pm=""
+  for candidate in pnpm yarn bun npm; do
+    if command_exists "$candidate" && [ -n "$(get_global_package_version "$candidate" "$LEGACY_PACKAGE_NAME")" ]; then
+      if [ -n "$legacy_pm" ]; then
+        error "$LEGACY_PACKAGE_NAME is installed by more than one package manager ($legacy_pm and $candidate)."
+        echo "  Remove the duplicate global packages, then rerun this installer."
+        exit 1
       fi
-    done
+      legacy_pm=$candidate
+    fi
+  done
+  if [ -n "$legacy_pm" ]; then
+    migrate_legacy_install "$legacy_pm"
+  fi
 
+  if command_exists "$BIN_NAME"; then
     info "OpenChamber is already installed — updating via 'openchamber update'..."
     echo ""
     if openchamber update; then
