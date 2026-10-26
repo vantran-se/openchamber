@@ -15,10 +15,10 @@ const languageContext: ComposerLanguageContext = {
 // MERGE_MSG; its last line is a `#` token at the caret.
 const conflictPrompt = "Preserve the intent of changes from MERGE_HEAD\n\n# Conflicts:\n#\tnotes.txt";
 
-describe.each([
+for (const [name, EditorComponent] of [
     ['CodeMirror', ComposerEditor],
     ['native textarea', ComposerEditorTextarea],
-] as const)('%s composer change reports text set through the value prop', (_name, EditorComponent) => {
+] as const) describe(`${name} composer change reports text set through the value prop`, () => {
     let browser: Window;
     let root: Root;
     let host: HTMLDivElement;
