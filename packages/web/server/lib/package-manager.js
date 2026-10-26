@@ -785,9 +785,22 @@ export async function checkForUpdates(options = {}) {
   if (currentVersion !== 'unknown') {
     const remote = await checkForUpdatesFromApi(currentVersion, options);
     if (remote) {
-      if (remote.available && appType === 'web') {
+      if (appType === 'web') {
         const npmLatest = await getLatestVersion();
-        if (!npmLatest || compareVersions(npmLatest, remote.version) < 0) {
+        if (npmLatest && compareVersions(npmLatest, currentVersion) > 0) {
+          if (!remote.available || compareVersions(npmLatest, remote.version) > 0) {
+            return {
+              available: true,
+              version: npmLatest,
+              currentVersion,
+              body: await fetchChangelogNotes(currentVersion, npmLatest),
+              releaseUrl: `${GITHUB_RELEASES_URL}/tag/v${npmLatest}`,
+              packageManager: pm,
+              updateCommand: 'openchamber update',
+            };
+          }
+        }
+        if (remote.available && (!npmLatest || compareVersions(npmLatest, remote.version) < 0)) {
           remote.available = false;
         }
       }

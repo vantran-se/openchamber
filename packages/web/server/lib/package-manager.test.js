@@ -335,6 +335,31 @@ describe('checkForUpdates', () => {
     expect(result.available).toBe(false);
   });
 
+  // --- Scenario: fork npm release is newer than the upstream update API ---
+
+  it('offers a newer fork package even when the upstream API says no update', async () => {
+    fetchMock
+      .when('api.openchamber.dev', {
+        ok: true,
+        json: async () => ({
+          latestVersion: '1.9.10',
+          updateAvailable: false,
+        }),
+      })
+      .when('registry.npmjs.org', {
+        ok: true,
+        json: async () => ({
+          'dist-tags': { latest: '1.10.0' },
+        }),
+      });
+
+    const result = await checkForUpdates({ currentVersion: '1.9.10' });
+
+    expect(result.available).toBe(true);
+    expect(result.version).toBe('1.10.0');
+    expect(result.releaseUrl).toBe('https://github.com/vantran-se/openchamber/releases/tag/v1.10.0');
+  });
+
   // --- Scenario: API says no update, npm agrees ---
 
   it('returns available=false when API says no update and versions match', async () => {

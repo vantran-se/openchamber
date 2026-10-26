@@ -26,7 +26,7 @@ export interface TextareaCaretCoords {
 }
 
 /** Return the viewport coordinates of a textarea's caret, including its x position. */
-export function textareaCaretCoords(textarea: HTMLTextAreaElement): TextareaCaretCoords | null {
+export function textareaCaretCoords(textarea: HTMLTextAreaElement, position = textarea.selectionStart): TextareaCaretCoords | null {
     const rect = textarea.getBoundingClientRect();
     const ownerDocument = textarea.ownerDocument ?? document;
     const mirror = ownerDocument.createElement('div');
@@ -48,7 +48,8 @@ export function textareaCaretCoords(textarea: HTMLTextAreaElement): TextareaCare
         mirror.style[property] = style[property];
     }
 
-    const before = textarea.value.slice(0, textarea.selectionStart ?? textarea.value.length);
+    const caret = Math.min(Math.max(position, 0), textarea.value.length);
+    const before = textarea.value.slice(0, caret);
     mirror.textContent = before;
     marker.textContent = '\u200b';
     mirror.append(marker);
