@@ -58,6 +58,17 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Verify source version
+        working-directory: packages/web
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          source_version=$(node -p "require('./package.json').version")
+          if [ "$source_version" != "$RELEASE_VERSION" ]; then
+            echo "Release version $RELEASE_VERSION does not match package version $source_version." >&2
+            exit 1
+          fi
+
       - name: Resolve published SDK version
         id: sdk
         run: echo "version=$(npm view @openchamber/sdk version --registry https://registry.npmjs.org)" >> "$GITHUB_OUTPUT"

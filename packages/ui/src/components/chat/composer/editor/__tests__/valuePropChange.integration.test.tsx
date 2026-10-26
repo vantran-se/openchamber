@@ -3,6 +3,7 @@ import { Window } from 'happy-dom';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { ComposerEditor, type ComposerChange, type ComposerEditorHandle } from '../ComposerEditor';
+import { ComposerEditorTextarea } from '../ComposerEditorTextarea';
 import type { ComposerLanguageContext } from '../../language/tokenize';
 
 const languageContext: ComposerLanguageContext = {
@@ -14,7 +15,10 @@ const languageContext: ComposerLanguageContext = {
 // MERGE_MSG; its last line is a `#` token at the caret.
 const conflictPrompt = "Preserve the intent of changes from MERGE_HEAD\n\n# Conflicts:\n#\tnotes.txt";
 
-describe('composer change reports text set through the value prop', () => {
+describe.each([
+    ['CodeMirror', ComposerEditor],
+    ['native textarea', ComposerEditorTextarea],
+] as const)('%s composer change reports text set through the value prop', (_name, EditorComponent) => {
     let browser: Window;
     let root: Root;
     let host: HTMLDivElement;
@@ -23,8 +27,8 @@ describe('composer change reports text set through the value prop', () => {
     const editor = React.createRef<ComposerEditorHandle>();
 
     const render = (value: string) => act(async () => root.render(
-        <ComposerEditor ref={editor} value={value} languageContext={languageContext}
-            onChange={(change) => { changes.push(change); }} />,
+        <EditorComponent ref={editor} value={value} languageContext={languageContext}
+            onChange={(change: ComposerChange) => { changes.push(change); }} />,
     ));
 
     beforeEach(async () => {

@@ -7,4 +7,4 @@ import { browserRandomId } from '@/lib/browserRandomId';
  * second fusion.
  */
 export const RUN_LAUNCHER_ID = browserRandomId(globalThis.crypto)
-  ?? `launcher-${Date.now().toString(36)}`;
+  ?? `launcher_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;

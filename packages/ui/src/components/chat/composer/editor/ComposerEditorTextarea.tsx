@@ -51,10 +51,15 @@ export const ComposerEditorTextarea = React.forwardRef<ComposerEditorHandle, Com
         const valueChangedExternally = value !== valueRef.current;
         valueRef.current = value;
 
-        const reportChange = React.useCallback((nextValue: string, selection: ComposerSelection, fromPaste: boolean) => {
+        const reportChange = React.useCallback((
+            nextValue: string,
+            selection: ComposerSelection,
+            fromPaste: boolean,
+            fromValueProp = false,
+        ) => {
             const edit = composerTextEdit(valueRef.current, nextValue);
             valueRef.current = nextValue;
-            onChange({ ...edit, selection, fromPaste, fromValueProp: false });
+            onChange({ ...edit, selection, fromPaste, fromValueProp });
         }, [onChange]);
 
         const applyEdit = React.useCallback((
@@ -82,8 +87,8 @@ export const ComposerEditorTextarea = React.forwardRef<ComposerEditorHandle, Com
             const textarea = textareaRef.current;
             if (!textarea || !valueChangedExternally || textarea.value !== value) return;
             const selection = setSelection(textarea, value.length);
-            onSelectionChange?.(selection);
-        }, [onSelectionChange, value, valueChangedExternally]);
+            reportChange(value, selection, false, true);
+        }, [reportChange, value, valueChangedExternally]);
 
         React.useLayoutEffect(() => {
             const textarea = textareaRef.current;
