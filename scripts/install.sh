@@ -313,9 +313,7 @@ main() {
       continue
     fi
     if ! inventory=$(get_global_package_inventory "$candidate"); then
-      error "Could not read the global package inventory from $candidate."
-      echo "  No packages were changed. Fix $candidate, then rerun this installer."
-      exit 1
+      continue
     fi
     legacy_version=$(printf '%s\n' "$inventory" | package_version_from_inventory "$LEGACY_PACKAGE_NAME")
     fork_version=$(printf '%s\n' "$inventory" | package_version_from_inventory "$PACKAGE_NAME")
