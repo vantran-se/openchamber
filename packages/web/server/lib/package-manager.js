@@ -944,13 +944,13 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
 
   const restorePrevious = () => {
     if (!restoreCommand || !restorePackage) return '';
-    const removedFork = runCommand(forkRemoveCommand);
-    const restored = removedFork.status === 0 ? runCommand(restoreCommand) : null;
+    runCommand(forkRemoveCommand);
+    const restored = runCommand(restoreCommand);
     const verified = getInstalledGlobalPackages(pm);
     const inventoryMatches = restorePackage.name === LEGACY_PACKAGE_NAME
       ? !verified.forkVersion && verified.legacyVersion === restorePackage.version
       : verified.forkVersion === restorePackage.version && !verified.legacyVersion;
-    return removedFork.status === 0 && restored?.status === 0 && inventoryMatches
+    return restored.status === 0 && inventoryMatches
       ? `; restored ${restorePackage.name}@${restorePackage.version}`
       : `; rollback failed—recover with: ${forkRemoveCommand} && ${restoreCommand}`;
   };
