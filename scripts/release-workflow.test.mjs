@@ -19,6 +19,8 @@ test('release workflow publishes only the fork web package', () => {
 });
 
 test('release version drives the package manifest and exact tarball publication', () => {
+  assert.match(run('Verify source version'), /source_version=.*package\.json/);
+  assert.match(run('Verify source version'), /source_version.*RELEASE_VERSION/);
   assert.match(run('Set fork package metadata'), /npm pkg set version="\$RELEASE_VERSION"/);
   assert.match(run('Publish package'), /steps\.pack\.outputs\.tarball/);
   assert.match(release.steps.find((step) => step.name === 'Create GitHub release and attach exact tarball').with.files, /steps\.pack\.outputs\.tarball/);
