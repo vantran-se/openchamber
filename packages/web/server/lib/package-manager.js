@@ -872,8 +872,13 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
   const installedBefore = getInstalledGlobalPackages(pm);
   const legacyRemoveCommand = getGlobalPackageCommand(pm, 'remove', LEGACY_PACKAGE_NAME);
   const forkRemoveCommand = getGlobalPackageCommand(pm, 'remove', PACKAGE_NAME);
-  const restoreCommand = installedBefore.legacyVersion
-    ? getGlobalPackageCommand(pm, 'install', `${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`)
+  const restorePackage = installedBefore.legacyVersion
+    ? { name: LEGACY_PACKAGE_NAME, version: installedBefore.legacyVersion }
+    : installedBefore.forkVersion
+      ? { name: PACKAGE_NAME, version: installedBefore.forkVersion }
+      : null;
+  const restoreCommand = restorePackage
+    ? getGlobalPackageCommand(pm, 'install', `${restorePackage.name}@${restorePackage.version}`)
     : null;
   const runCommand = (value) => spawnSync(value, {
     stdio: 'inherit',
@@ -884,6 +889,14 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
   if (!options?.silent) {
     console.log(`Updating ${PACKAGE_NAME} using ${pm}...`);
     console.log(`Running: ${command}`);
+  }
+
+  if (installedBefore.forkVersion && installedBefore.legacyVersion) {
+    return {
+      success: false,
+      exitCode: 1,
+      error: `Both ${PACKAGE_NAME} and ${LEGACY_PACKAGE_NAME} are installed globally with ${pm}; remove the duplicate before updating.`,
+    };
   }
 
   if (installedBefore.legacyVersion) {
@@ -899,16 +912,16 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
 
   const result = runCommand(command);
 
-  const restoreLegacy = () => {
-    if (!restoreCommand) return '';
+  const restorePrevious = () => {
+    if (!restoreCommand || !restorePackage) return '';
     const removedFork = runCommand(forkRemoveCommand);
     const restored = removedFork.status === 0 ? runCommand(restoreCommand) : null;
     const verified = getInstalledGlobalPackages(pm);
-    return removedFork.status === 0
-      && restored?.status === 0
-      && !verified.forkVersion
-      && verified.legacyVersion === installedBefore.legacyVersion
-      ? `; restored ${LEGACY_PACKAGE_NAME}@${installedBefore.legacyVersion}`
+    const inventoryMatches = restorePackage.name === LEGACY_PACKAGE_NAME
+      ? !verified.forkVersion && verified.legacyVersion === restorePackage.version
+      : verified.forkVersion === restorePackage.version && !verified.legacyVersion;
+    return removedFork.status === 0 && restored?.status === 0 && inventoryMatches
+      ? `; restored ${restorePackage.name}@${restorePackage.version}`
       : `; rollback failed—recover with: ${restoreCommand}`;
   };
 
@@ -916,7 +929,7 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     return {
       success: false,
       exitCode: result.status,
-      error: `Package manager exited with code ${result.status}${restoreLegacy()}`,
+      error: `Package manager exited with code ${result.status}${restorePrevious()}`,
     };
   }
 
@@ -944,7 +957,7 @@ export function executeUpdate(pm = detectPackageManager(), options = {}) {
     return {
       success: false,
       exitCode: result.status,
-      error: `${verificationError}${restoreLegacy()}`,
+      error: `${verificationError}${restorePrevious()}`,
     };
   }
 
