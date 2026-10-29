@@ -68,4 +68,13 @@ for (const [name, EditorComponent] of [
         expect(changes).toHaveLength(2);
         expect(changes[1]).toMatchObject({ value: `${conflictPrompt}\n#`, fromValueProp: false });
     });
+
+    test('keeps the caller-provided chat input marker', async () => {
+        await act(async () => root.render(
+            <EditorComponent ref={editor} value="" languageContext={languageContext}
+                dataChatInput="comment" onChange={() => undefined} />,
+        ));
+        expect(host.querySelector('[data-chat-input="comment"]')).not.toBeNull();
+        expect(host.querySelector('[data-chat-input="true"]')).toBeNull();
+    });
 });

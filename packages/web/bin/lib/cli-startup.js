@@ -196,8 +196,10 @@ function stablePnpmEntrypoint(resolved, exists = fs.existsSync) {
 // starts the CLI through that link. Resolving it would pin the service to a
 // directory the next update deletes.
 function isPnpmGlobalLinkEntrypoint(invoked) {
-  const packageIndex = invoked.indexOf(PACKAGE_SEGMENT);
-  if (packageIndex < 0) return false;
+  const packageIndex = PACKAGE_SEGMENTS
+    .map((segment) => invoked.indexOf(segment))
+    .find((index) => index >= 0);
+  if (packageIndex === undefined) return false;
   const linkPath = invoked.slice(0, packageIndex);
   const layoutDir = path.dirname(linkPath);
   if (!/^v\d+$/.test(path.basename(layoutDir)) || path.basename(path.dirname(layoutDir)) !== 'global') {

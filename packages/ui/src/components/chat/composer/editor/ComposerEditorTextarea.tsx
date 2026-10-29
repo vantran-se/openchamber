@@ -178,7 +178,7 @@ export const ComposerEditorTextarea = React.forwardRef<ComposerEditorHandle, Com
         return (
             <div
                 ref={hostRef}
-                data-chat-input="true"
+                data-chat-input={props.dataChatInput ?? 'true'}
                 className={cn(
                     'composer-editor w-full',
                     fillContainer && 'flex min-h-0 flex-1 flex-col',

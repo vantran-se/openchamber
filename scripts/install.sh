@@ -346,6 +346,12 @@ main() {
     INSTALL_CMD=$(get_install_command "$fork_pm")
     info "Repairing the existing $PACKAGE_NAME installation with $fork_pm..."
     eval "$INSTALL_CMD"
+    repaired_version=$(get_global_package_version "$fork_pm" "$PACKAGE_NAME")
+    if [ -z "$repaired_version" ] || ! command_exists "$BIN_NAME"; then
+      error "$PACKAGE_NAME is installed, but this shell still cannot run $BIN_NAME."
+      echo "  Check the $fork_pm global bin directory and PATH, then rerun this installer."
+      exit 1
+    fi
     success "OpenChamber is up to date."
     exit 0
   fi

@@ -40,11 +40,11 @@ const packageManagerCases = [
   },
 ];
 
-const fixture = (pm, { failForkInstall = false, binaryOnPath = true } = {}) => {
+const fixture = (pm, { failForkInstall = false, binaryOnPath = true, initialState = 'legacy' } = {}) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-install-'));
   const state = path.join(directory, 'state');
   const log = path.join(directory, 'log');
-  fs.writeFileSync(state, 'legacy');
+  fs.writeFileSync(state, initialState);
   executable(directory, 'node', 'echo v24.14.0');
   if (binaryOnPath) executable(directory, 'openchamber', 'echo "legacy updater must not run" >&2; exit 99');
   executable(directory, pm.name, `
@@ -97,6 +97,19 @@ esac`);
 
   assert.equal(result.status, 1);
   assert.match(result.stdout, /Both @openchamber\/web and @vantran-se\/openchamber-web are installed globally/);
+});
+
+test('fails when repairing a fork install does not restore the executable', () => {
+  const pm = packageManagerCases[0];
+  const { directory } = fixture(pm, { binaryOnPath: false, initialState: 'fork' });
+
+  const result = spawnSync('/bin/bash', [installer], {
+    env: { ...process.env, PATH: `${directory}:/usr/bin:/bin`, HOME: directory, TERM: 'dumb' },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /still cannot run openchamber/);
 });
 
 test('restores the exact legacy package when installer migration fails', () => {

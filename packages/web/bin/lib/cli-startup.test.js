@@ -37,10 +37,12 @@ describe('buildSystemdUserService', () => {
     expect(unit).toMatch(/^SuccessExitStatus=143$/m);
   });
 
-  it('starts a pnpm 11+ global install through the link that survives updates', () => {
+  it.each([
+    join('node_modules', '@openchamber', 'web', 'bin', 'cli.js'),
+    join('node_modules', '@vantran-se', 'openchamber-web', 'bin', 'cli.js'),
+  ])('starts a pnpm 11+ global install through the link that survives updates: %s', (packageEntry) => {
     const pnpmHome = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-pnpm-'));
     const globalDir = join(pnpmHome, 'global', 'v11');
-    const packageEntry = join('node_modules', '@openchamber', 'web', 'bin', 'cli.js');
     const previousEntry = process.argv[1];
     try {
       fs.mkdirSync(path.dirname(join(globalDir, '3e0-install', packageEntry)), { recursive: true });
